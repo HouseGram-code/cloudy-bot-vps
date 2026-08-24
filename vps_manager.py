@@ -47,6 +47,9 @@ PROFILE_HOOK = "/etc/profile.d/00-cloudy-banner.sh"
 # Shell snippet sourced by every interactive shell in the guest.
 BANNER_HOOK = """# cloudy-banner (managed by Cloudy VPS Bot)
 export CLOUDY_LANG="${CLOUDY_LANG:-%(lang)s}"
+export CLOUDY_RAM_MB="${CLOUDY_RAM_MB:-%(ram)s}"
+export CLOUDY_DISK_GB="${CLOUDY_DISK_GB:-%(disk)s}"
+export CLOUDY_CPU="${CLOUDY_CPU:-%(cpu)s}"
 alias banner='/usr/local/bin/cloudy-banner'
 case $- in
   *i*)
@@ -63,6 +66,9 @@ esac
 LOGIN_WRAPPER = """#!/bin/bash
 export TERM="${TERM:-xterm-256color}"
 export CLOUDY_LANG="${CLOUDY_LANG:-%(lang)s}"
+export CLOUDY_RAM_MB="${CLOUDY_RAM_MB:-%(ram)s}"
+export CLOUDY_DISK_GB="${CLOUDY_DISK_GB:-%(disk)s}"
+export CLOUDY_CPU="${CLOUDY_CPU:-%(cpu)s}"
 if [ -x /usr/local/bin/cloudy-banner ]; then
   /usr/local/bin/cloudy-banner
 fi
@@ -218,6 +224,10 @@ class VPSManager:
                 "TERM": "xterm-256color",
                 "LANG": "C.UTF-8",
                 "CLOUDY_LANG": "ru" if str(lang).startswith("ru") else "en",
+                # The banner shows the plan limits, not the metrics of the host.
+                "CLOUDY_RAM_MB": str(PLAN["ram_mb"]),
+                "CLOUDY_DISK_GB": str(PLAN["disk_gb"]),
+                "CLOUDY_CPU": str(PLAN["cpu_cores"]),
             },
             labels={
                 "cloudy.vps": "true",
@@ -312,8 +322,14 @@ class VPSManager:
         def b64(text: str) -> str:
             return base64.b64encode(text.encode("utf-8")).decode("ascii")
 
-        hook_b64 = b64(BANNER_HOOK % {"lang": guest_lang})
-        login_b64 = b64(LOGIN_WRAPPER % {"lang": guest_lang})
+        fields = {
+            "lang": guest_lang,
+            "ram": PLAN["ram_mb"],
+            "disk": PLAN["disk_gb"],
+            "cpu": PLAN["cpu_cores"],
+        }
+        hook_b64 = b64(BANNER_HOOK % fields)
+        login_b64 = b64(LOGIN_WRAPPER % fields)
         clean = "/cloudy-banner/d;/cloudy-login/d;/^alias banner=/d;/^export CLOUDY_LANG=/d"
 
         script = (

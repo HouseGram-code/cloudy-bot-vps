@@ -1,82 +1,83 @@
 #!/usr/bin/env bash
-# Cloudy VPS - pretty login banner (ASCII art + live system info)
-# Localized with CLOUDY_LANG=ru|en (defaults to en).
+# Cloudy VPS - compact login banner.
+# Localized with CLOUDY_LANG=ru|en. Shows the VPS limits (cgroup / plan env),
+# not the metrics of the physical host.
 
 set -u
 
-# ---- colors (disabled when output is not a terminal) ----
 if [ -t 1 ]; then
 	R=$'\e[0m'; B=$'\e[1m'
-	CY=$'\e[38;5;81m'; BL=$'\e[38;5;105m'; GR=$'\e[38;5;114m'
-	YE=$'\e[38;5;221m'; GY=$'\e[38;5;245m'; RD=$'\e[38;5;203m'
+	CY=$'\e[38;5;81m'; GR=$'\e[38;5;114m'; YE=$'\e[38;5;221m'
+	GY=$'\e[38;5;245m'; RD=$'\e[38;5;203m'
 else
-	R=""; B=""; CY=""; BL=""; GR=""; YE=""; GY=""; RD=""
+	R=""; B=""; CY=""; GR=""; YE=""; GY=""; RD=""
 fi
 
 LANG_SEL="${CLOUDY_LANG:-en}"
-case "$LANG_SEL" in
-	ru*) LANG_SEL="ru" ;;
-	*)   LANG_SEL="en" ;;
-esac
+case "$LANG_SEL" in ru*) LANG_SEL="ru" ;; *) LANG_SEL="en" ;; esac
 
 if [ "$LANG_SEL" = "ru" ]; then
-	L_WELCOME="Добро пожаловать на ваш бесплатный VPS"
-	L_OS="Система";      L_KERNEL="Ядро";    L_HOST="Хост"
-	L_IP="IP-адрес";     L_CPU="Процессор";  L_RAM="Память"
-	L_DISK="Диск";       L_UPTIME="Онлайн";  L_LOAD="Нагрузка"
-	L_TIP="Подсказка"
-	L_TIPS=(
-		"htop — мониторинг, tmux — сессии, neofetch — инфо о системе"
-		"Файлы в /root не сохраняются после удаления VPS — делайте бэкапы"
-		"apt install <пакет> работает: у вас полный root-доступ"
-		"Сессия SSH закрывается при остановке VPS — берите новый ключ кнопкой"
-	)
-	L_TIER="Бесплатный тариф"
+	L_TIER="Бесплатный VPS"; L_RAM="ОЗУ"; L_DISK="Диск"; L_CPU="CPU"
+	L_UP="онлайн"; L_HINT="banner — показать снова"
 else
-	L_WELCOME="Welcome to your free VPS"
-	L_OS="OS";           L_KERNEL="Kernel";  L_HOST="Host"
-	L_IP="IP address";   L_CPU="CPU";        L_RAM="Memory"
-	L_DISK="Disk";       L_UPTIME="Uptime";  L_LOAD="Load"
-	L_TIP="Tip"
-	L_TIPS=(
-		"htop for monitoring, tmux for persistent sessions, neofetch for specs"
-		"Files are lost when the VPS is destroyed — keep your own backups"
-		"apt install <package> works fine: you have full root access"
-		"The SSH session dies when the VPS stops — grab a fresh key in Discord"
-	)
-	L_TIER="Free Tier"
+	L_TIER="Free VPS"; L_RAM="RAM"; L_DISK="Disk"; L_CPU="CPU"
+	L_UP="uptime"; L_HINT="type 'banner' to show this again"
 fi
 
-# ---- facts ----
+# ---- facts -----------------------------------------------------------------
 os_name="$( . /etc/os-release 2>/dev/null; printf '%s' "${PRETTY_NAME:-Linux}" )"
-kernel="$(uname -r)"
-host_name="$(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || printf '%s' "${HOSTNAME:-vps}")"
+host_name="$(hostname 2>/dev/null)"
+[ -n "$host_name" ] || host_name="$(cat /etc/hostname 2>/dev/null)"
+[ -n "$host_name" ] || host_name="${HOSTNAME:-vps}"
 ip_addr="$(hostname -I 2>/dev/null | awk '{print $1}')"
-[ -n "$ip_addr" ] || ip_addr="—"
-cpu_model="$(awk -F': ' '/model name/{print $2; exit}' /proc/cpuinfo 2>/dev/null)"
-[ -n "$cpu_model" ] || cpu_model="virtual CPU"
-cpu_count="$(nproc 2>/dev/null || echo 1)"
-load="$(awk '{printf "%s  %s  %s", $1, $2, $3}' /proc/loadavg 2>/dev/null)"
+[ -n "$ip_addr" ] || ip_addr="-"
 
-mem_total="$(awk '/^MemTotal:/{printf "%d", $2/1024}' /proc/meminfo)"
-mem_avail="$(awk '/^MemAvailable:/{printf "%d", $2/1024}' /proc/meminfo)"
-mem_used=$(( mem_total - mem_avail ))
+# CPU: cgroup quota first, then the plan env, then nproc.
+cpu=""
+if [ -r /sys/fs/cgroup/cpu.max ]; then
+	cpu="$(awk '{if ($1 != "max" && $2 > 0) printf "%.3g", $1/$2}' /sys/fs/cgroup/cpu.max)"
+elif [ -r /sys/fs/cgroup/cpu/cpu.cfs_quota_us ]; then
+	q="$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us 2>/dev/null || echo -1)"
+	p="$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us 2>/dev/null || echo 0)"
+	[ "$q" -gt 0 ] 2>/dev/null && [ "$p" -gt 0 ] 2>/dev/null && \
+		cpu="$(awk -v q="$q" -v p="$p" 'BEGIN{printf "%.3g", q/p}')"
+fi
+[ -n "$cpu" ] || cpu="${CLOUDY_CPU:-$(nproc 2>/dev/null || echo 1)}"
+
+# RAM: cgroup limit / usage, so it reflects the VPS and not the host.
+mem_total=0; mem_used=0
+if [ -r /sys/fs/cgroup/memory.max ]; then
+	lim="$(cat /sys/fs/cgroup/memory.max)"
+	[ "$lim" != "max" ] && mem_total=$(( lim / 1048576 ))
+	[ -r /sys/fs/cgroup/memory.current ] && \
+		mem_used=$(( $(cat /sys/fs/cgroup/memory.current) / 1048576 ))
+elif [ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]; then
+	lim="$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)"
+	[ "$lim" -lt 9223372036854771712 ] 2>/dev/null && mem_total=$(( lim / 1048576 ))
+	[ -r /sys/fs/cgroup/memory/memory.usage_in_bytes ] && \
+		mem_used=$(( $(cat /sys/fs/cgroup/memory/memory.usage_in_bytes) / 1048576 ))
+fi
+if [ "$mem_total" -le 0 ] 2>/dev/null; then
+	mem_total="${CLOUDY_RAM_MB:-$(awk '/^MemTotal:/{printf "%d", $2/1024}' /proc/meminfo)}"
+	mem_used=$(awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} END{printf "%d", (t-a)/1024}' /proc/meminfo)
+fi
 [ "$mem_total" -gt 0 ] 2>/dev/null || mem_total=1
 mem_pct=$(( mem_used * 100 / mem_total ))
 
-disk_used="$(df -h / 2>/dev/null | awk 'NR==2{print $3}')"
-disk_size="$(df -h / 2>/dev/null | awk 'NR==2{print $2}')"
-disk_pct="$(df -h / 2>/dev/null | awk 'NR==2{gsub("%","",$5); print $5}')"
-[ -n "$disk_pct" ] || disk_pct=0
+# Disk: usage of / but capped by the plan size when the bot passes it.
+disk_used_g="$(df -B1G / 2>/dev/null | awk 'NR==2{gsub("G","",$3); print $3+0}')"
+[ -n "$disk_used_g" ] || disk_used_g=0
+disk_total_g="${CLOUDY_DISK_GB:-$(df -B1G / 2>/dev/null | awk 'NR==2{gsub("G","",$2); print $2+0}')}"
+[ "$disk_total_g" -gt 0 ] 2>/dev/null || disk_total_g=1
+[ "$disk_used_g" -gt "$disk_total_g" ] 2>/dev/null && disk_used_g="$disk_total_g"
+disk_pct=$(( disk_used_g * 100 / disk_total_g ))
 
-uptime_h="$(awk -v ru="$LANG_SEL" '{s=int($1); d=int(s/86400); h=int((s%86400)/3600); m=int((s%3600)/60);
-	if (d>0) printf "%dd %dh %dm", d, h, m; else if (h>0) printf "%dh %dm", h, m; else printf "%dm", m}' /proc/uptime)"
+uptime_h="$(awk '{s=int($1); d=int(s/86400); h=int((s%86400)/3600); m=int((s%3600)/60);
+	if (d>0) printf "%dd %dh", d, h; else if (h>0) printf "%dh %dm", h, m; else printf "%dm", m}' /proc/uptime)"
 
-tip="${L_TIPS[$(( RANDOM % ${#L_TIPS[@]} ))]}"
-
-# ---- helpers ----
-bar() { # bar <percent> -> colored gauge
-	local pct="$1" width=18 filled color
+# ---- helpers ---------------------------------------------------------------
+bar() { # bar <percent> -> short colored gauge
+	local pct="$1" width=10 filled color i
 	[ "$pct" -lt 0 ] 2>/dev/null && pct=0
 	[ "$pct" -gt 100 ] 2>/dev/null && pct=100
 	filled=$(( pct * width / 100 ))
@@ -84,45 +85,20 @@ bar() { # bar <percent> -> colored gauge
 	elif [ "$pct" -ge 60 ]; then color="$YE"
 	else color="$GR"; fi
 	printf '%s' "$color"
-	for ((i=0; i<filled; i++)); do printf '█'; done
+	for ((i=0; i<filled; i++)); do printf '▰'; done
 	printf '%s' "$GY"
-	for ((i=filled; i<width; i++)); do printf '░'; done
+	for ((i=filled; i<width; i++)); do printf '▱'; done
 	printf '%s' "$R"
 }
 
-# Pad by visible characters, not bytes, so Cyrillic labels stay aligned.
-pad() { # pad <text> <width>
-	local text="$1" width="$2" len pad_str=""
-	len=${#text}
-	while [ "$len" -lt "$width" ]; do
-		pad_str="$pad_str "
-		len=$(( len + 1 ))
-	done
-	printf '%s%s' "$text" "$pad_str"
-}
-
-row() { # row <label> <value>
-	printf "   ${BL}%s${R} ${GY}│${R} %s\n" "$(pad "$1" 12)" "$2"
-}
-
-# ---- render ----
+# ---- render ----------------------------------------------------------------
 printf '\n'
-printf "${CY}${B}    ██████╗██╗      ██████╗ ██╗   ██╗██████╗ ██╗   ██╗${R}\n"
-printf "${CY}${B}   ██╔════╝██║     ██╔═══██╗██║   ██║██╔══██╗╚██╗ ██╔╝${R}\n"
-printf "${CY}${B}   ██║     ██║     ██║   ██║██║   ██║██║  ██║ ╚████╔╝ ${R}\n"
-printf "${CY}${B}   ██║     ██║     ██║   ██║██║   ██║██║  ██║  ╚██╔╝  ${R}\n"
-printf "${CY}${B}   ╚██████╗███████╗╚██████╔╝╚██████╔╝██████╔╝   ██║   ${R}\n"
-printf "${CY}${B}    ╚═════╝╚══════╝ ╚═════╝  ╚═════╝ ╚═════╝    ╚═╝   ${R}\n"
-printf '\n'
-printf "   ${B}%s${R} ${GY}·${R} ${YE}%s${R} ${GY}·${R} ${GY}powered by Cloudy VPS Bot${R}\n" "$L_WELCOME" "$L_TIER"
-printf "   ${GY}────────────────────────────────────────────────────────────${R}\n"
-
-row "$L_OS"     "${B}${os_name}${R}"
-row "$L_KERNEL" "${kernel}"
-row "$L_HOST"   "${B}${host_name}${R}  ${GY}(${ip_addr})${R}"
-row "$L_CPU"    "${cpu_model} ${GY}×${R} ${B}${cpu_count}${R}   ${GY}load:${R} ${load}"
-row "$L_RAM"    "$(bar "$mem_pct")  ${B}${mem_used}${R}/${mem_total} MB ${GY}(${mem_pct}%)${R}"
-row "$L_DISK"   "$(bar "$disk_pct")  ${B}${disk_used:-?}${R}/${disk_size:-?} ${GY}(${disk_pct}%)${R}"
-row "$L_UPTIME" "${uptime_h}"
-printf "   ${GY}────────────────────────────────────────────────────────────${R}\n"
-printf "   ${GR}%s:${R} ${GY}%s${R}\n\n" "$L_TIP" "$tip"
+printf "  ${CY}${B}☁ CLOUDY VPS${R}  ${GY}·${R}  ${B}%s${R}  ${GY}·${R}  ${YE}%s${R}\n" \
+	"$os_name" "$L_TIER"
+printf "  ${GY}%s (%s)${R}  ${GY}·${R}  ${GY}%s${R} ${B}%s${R}\n" \
+	"$host_name" "$ip_addr" "$L_UP" "$uptime_h"
+printf "  ${B}%s${R} %s ${B}%s${R}/%s MB   ${B}%s${R} %s ${B}%s${R}/%s G   ${B}%s${R} ${B}%s${R}\n" \
+	"$L_RAM"  "$(bar "$mem_pct")"  "$mem_used"     "$mem_total" \
+	"$L_DISK" "$(bar "$disk_pct")" "$disk_used_g" "$disk_total_g" \
+	"$L_CPU"  "$cpu"
+printf "  ${GY}%s${R}\n\n" "$L_HINT"
