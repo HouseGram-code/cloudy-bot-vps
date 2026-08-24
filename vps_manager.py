@@ -22,6 +22,10 @@ from config import (
     MAX_VPS_PER_USER,
     PLAN,
     STATE_FILE,
+    TMATE_ED25519_FINGERPRINT,
+    TMATE_PORTS,
+    TMATE_RSA_FINGERPRINT,
+    TMATE_SERVER_HOST,
     TMATE_TIMEOUT,
     VPS_DNS,
     VPS_IMAGE,
@@ -36,6 +40,7 @@ IMAGE_CONTEXT = os.path.join(
 
 TMATE_SOCK = "/tmp/cloudy.tmate.sock"
 TMATE_LOG = "/tmp/cloudy.tmate.log"
+TMATE_CONF = "/root/.tmate.conf"
 
 # Static tmate build used when the distro package is unavailable.
 _GH = "https://" + "github.com/tmate-io/tmate/releases/download"
@@ -368,16 +373,83 @@ class VPSManager:
             )
 
     def _network_diagnostics(self, container) -> str:
+        port_checks = "; ".join(
+            f"echo '--- tcp {p} ---'; "
+            f"(timeout 6 bash -c '</dev/tcp/{TMATE_SERVER_HOST}/{p}' "
+            "&& echo 'TCP OK' || echo 'TCP FAILED')"
+            for p in TMATE_PORTS
+        )
         checks = (
-            "echo '--- dns ---'; (getent hosts ssh.tmate.io || echo 'DNS FAILED'); "
-            "echo '--- tcp 2200 ---'; "
-            "(timeout 6 bash -c '</dev/tcp/ssh.tmate.io/2200' "
-            "&& echo 'TCP OK' || echo 'TCP FAILED'); "
+            f"echo '--- dns ---'; (getent hosts {TMATE_SERVER_HOST} || echo 'DNS FAILED'); "
+            f"{port_checks}; "
             "echo '--- tmate version ---'; (tmate -V 2>&1 | head -1); "
             f"echo '--- log ---'; (tail -n 12 {TMATE_LOG} 2>/dev/null || echo 'no log')"
         )
         _, out, err = self._exec(container, checks)
         return (out or err or "no diagnostics").strip()
+
+    # -- relay port handling -------------------------------------------
+    def _reachable_ports(self, container) -> list[int]:
+        """Return the tmate relay ports the guest can actually reach."""
+        probe = "; ".join(
+            f"(timeout 5 bash -c '</dev/tcp/{TMATE_SERVER_HOST}/{p}' "
+            f"&& echo 'OPEN {p}') 2>/dev/null"
+            for p in TMATE_PORTS
+        )
+        _, out, _ = self._exec(container, probe)
+        open_ports = [
+            int(line.split()[1])
+            for line in out.splitlines()
+            if line.strip().startswith("OPEN ")
+        ]
+        # Keep the configured priority order; if nothing looks open we still
+        # try every port, because some firewalls only block the probe.
+        ordered = [p for p in TMATE_PORTS if p in open_ports]
+        return ordered or list(TMATE_PORTS)
+
+    def _write_tmate_conf(self, container, port: int) -> None:
+        """Point tmate at the relay host/port that we want to use."""
+        lines = [
+            f"set -g tmate-server-host {TMATE_SERVER_HOST}",
+            f"set -g tmate-server-port {port}",
+        ]
+        if TMATE_RSA_FINGERPRINT:
+            lines.append(f"set -g tmate-server-rsa-fingerprint {TMATE_RSA_FINGERPRINT}")
+        if TMATE_ED25519_FINGERPRINT:
+            lines.append(
+                f"set -g tmate-server-ed25519-fingerprint {TMATE_ED25519_FINGERPRINT}"
+            )
+        body = "\\n".join(lines)
+        self._exec(container, f"printf '{body}\\n' > {TMATE_CONF}")
+
+    def _start_session(self, container, port: int, budget: float) -> str:
+        """Start a detached tmate session on `port`; return the ssh line or ""."""
+        self._write_tmate_conf(container, port)
+        start = (
+            f"pkill -f 'tmate -S {TMATE_SOCK}' >/dev/null 2>&1; "
+            f"rm -f {TMATE_SOCK} {TMATE_LOG}; "
+            "mkdir -p /root/.ssh && chmod 700 /root/.ssh; "
+            "export TERM=xterm-256color; "
+            f"nohup tmate -f {TMATE_CONF} -S {TMATE_SOCK} -F new-session -d "
+            f"'TERM=xterm-256color bash -l' > {TMATE_LOG} 2>&1 & "
+            "sleep 2; echo started"
+        )
+        self._exec(container, start)
+
+        deadline = time.monotonic() + budget
+        while time.monotonic() < deadline:
+            code, out, _ = self._exec(
+                container,
+                f"tmate -S {TMATE_SOCK} display -p '#{{tmate_ssh}}' 2>/dev/null",
+            )
+            candidate = next(
+                (ln.strip() for ln in out.splitlines() if ln.strip().startswith("ssh ")),
+                "",
+            )
+            if code == 0 and candidate and "@" in candidate:
+                return candidate
+            time.sleep(2)
+        return ""
 
     def _tmate_sync(self, user_id: int, force_new: bool = False) -> str:
         container = self._container(user_id)
@@ -403,45 +475,46 @@ class VPSManager:
 
         self._ensure_tmate_binary(container)
 
-        # Fresh session: kill the old server, then start detached with logging.
-        start = (
-            f"pkill -f 'tmate -S {TMATE_SOCK}' >/dev/null 2>&1; "
-            f"rm -f {TMATE_SOCK} {TMATE_LOG}; "
-            "mkdir -p /root/.ssh && chmod 700 /root/.ssh; "
-            "export TERM=xterm-256color; "
-            f"nohup tmate -S {TMATE_SOCK} -F new-session -d "
-            f"'TERM=xterm-256color bash -l' > {TMATE_LOG} 2>&1 & "
-            "sleep 2; echo started"
-        )
-        self._exec(container, start)
+        # The default relay port (2200) is blocked on a lot of hosts, so try
+        # every configured port and keep the first one that produces a session.
+        candidates = self._reachable_ports(container)
+        budget = max(20.0, float(TMATE_TIMEOUT - 10))
+        per_port = max(15.0, budget / max(1, len(candidates)))
 
-        # Poll for the SSH string instead of blocking forever on `tmate wait`.
-        deadline = time.monotonic() + max(20, TMATE_TIMEOUT - 10)
         ssh_line = ""
-        while time.monotonic() < deadline:
-            code, out, _ = self._exec(
-                container,
-                f"tmate -S {TMATE_SOCK} display -p '#{{tmate_ssh}}' 2>/dev/null",
+        used_port = None
+        for port in candidates:
+            log.info(
+                "opening tmate session for %s via %s:%s",
+                container.short_id,
+                TMATE_SERVER_HOST,
+                port,
             )
-            candidate = next(
-                (ln.strip() for ln in out.splitlines() if ln.strip().startswith("ssh ")),
-                "",
-            )
-            if code == 0 and candidate and "@" in candidate:
-                ssh_line = candidate
+            ssh_line = self._start_session(container, port, per_port)
+            if ssh_line:
+                used_port = port
                 break
-            time.sleep(2)
 
         if not ssh_line:
             diag = self._network_diagnostics(container)
+            tried = ", ".join(str(p) for p in candidates)
             raise VPSError(
                 "**Could not open a tmate session.**\n"
-                "tmate needs outbound access to `ssh.tmate.io` on TCP **2200** — "
-                "check the host firewall and DNS.\n"
+                f"Tried `{TMATE_SERVER_HOST}` on TCP **{tried}** and every port was "
+                "blocked. Allow outbound traffic on at least one of them, e.g.:\n"
+                "```bash\n"
+                "sudo ufw allow out 2200/tcp\n"
+                "# or, on nftables/iptables hosts:\n"
+                "sudo iptables -A OUTPUT -p tcp --dport 2200 -j ACCEPT\n"
+                "```\n"
+                "If your provider blocks unusual ports entirely, point the bot at a "
+                "self-hosted relay with `TMATE_SERVER_HOST`, `TMATE_PORTS`, "
+                "`TMATE_RSA_FINGERPRINT` and `TMATE_ED25519_FINGERPRINT` in `.env`.\n"
                 f"```\n{diag[-900:]}\n```"
             )
 
         record["ssh"] = ssh_line
+        record["tmate_port"] = used_port
         self._save_state()
         return ssh_line
 

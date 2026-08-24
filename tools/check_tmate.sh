@@ -4,17 +4,38 @@
 #
 #   bash tools/check_tmate.sh                 # host + newest guest container
 #   bash tools/check_tmate.sh <container>     # a specific guest container
+#
+# The bot no longer depends on TCP 2200 only: it probes every port in
+# TMATE_PORTS (default 2200,22,443) and uses the first one that connects.
 # ---------------------------------------------------------------------------
 set -uo pipefail
 
 IMAGE="${VPS_IMAGE:-cloudy-vps:ubuntu-22.04}"
 PREFIX="${CONTAINER_PREFIX:-cloudy-vps}"
+TMATE_HOST="${TMATE_SERVER_HOST:-ssh.tmate.io}"
+PORTS="${TMATE_PORTS:-2200,22,443}"
+PORT_LIST="${PORTS//,/ }"
 
 echo "===== HOST ===================================================="
-echo -n "DNS ssh.tmate.io : "
-if getent hosts ssh.tmate.io >/dev/null 2>&1; then echo "OK"; else echo "FAILED"; fi
-echo -n "TCP 2200         : "
-if timeout 6 bash -c '</dev/tcp/ssh.tmate.io/2200' 2>/dev/null; then echo "OK"; else echo "BLOCKED (open outbound TCP 2200 in your firewall)"; fi
+echo "relay host       : $TMATE_HOST"
+echo "ports to try     : $PORT_LIST"
+echo -n "DNS $TMATE_HOST : "
+if getent hosts "$TMATE_HOST" >/dev/null 2>&1; then echo "OK"; else echo "FAILED"; fi
+OPEN_HOST=""
+for p in $PORT_LIST; do
+  printf 'TCP %-5s        : ' "$p"
+  if timeout 6 bash -c "</dev/tcp/$TMATE_HOST/$p" 2>/dev/null; then
+    echo "OK"
+    OPEN_HOST="$OPEN_HOST $p"
+  else
+    echo "BLOCKED"
+  fi
+done
+if [[ -z "${OPEN_HOST// /}" ]]; then
+  echo "!! Every relay port is blocked on the host. Open at least one, e.g.:"
+  echo "     sudo ufw allow out 2200/tcp   # or 22/tcp, 443/tcp"
+  echo "     sudo iptables -A OUTPUT -p tcp --dport 2200 -j ACCEPT"
+fi
 echo -n "Guest image      : "
 if docker image inspect "$IMAGE" >/dev/null 2>&1; then echo "$IMAGE present"; else echo "MISSING - run: docker build -t $IMAGE ./images/ubuntu-22.04"; fi
 
@@ -32,26 +53,36 @@ fi
 
 echo
 echo "===== GUEST: $CONTAINER ======================================"
-docker exec "$CONTAINER" bash -lc '
+docker exec -e TMATE_HOST="$TMATE_HOST" -e PORT_LIST="$PORT_LIST" "$CONTAINER" bash -lc '
   echo -n "tmate binary     : "; command -v tmate || echo MISSING
   echo -n "tmate version    : "; tmate -V 2>&1 | head -1
-  echo -n "DNS ssh.tmate.io : "; getent hosts ssh.tmate.io >/dev/null 2>&1 && echo OK || echo FAILED
-  echo -n "TCP 2200         : "; timeout 6 bash -c "</dev/tcp/ssh.tmate.io/2200" 2>/dev/null && echo OK || echo BLOCKED
+  echo -n "DNS $TMATE_HOST : "; getent hosts "$TMATE_HOST" >/dev/null 2>&1 && echo OK || echo FAILED
+  for p in $PORT_LIST; do
+    printf "TCP %-5s        : " "$p"
+    timeout 6 bash -c "</dev/tcp/$TMATE_HOST/$p" 2>/dev/null && echo OK || echo BLOCKED
+  done
+  echo "--- tmate config ---"
+  cat /root/.tmate.conf 2>/dev/null || echo "no /root/.tmate.conf yet"
   echo "--- last tmate log ---"
   tail -n 15 /tmp/cloudy.tmate.log 2>/dev/null || echo "no log yet"
 '
 
 echo
-echo "===== LIVE TEST (fresh session) =============================="
-docker exec "$CONTAINER" bash -lc '
+echo "===== LIVE TEST (fresh session, every port) ==================="
+docker exec -e TMATE_HOST="$TMATE_HOST" -e PORT_LIST="$PORT_LIST" "$CONTAINER" bash -lc '
   S=/tmp/diag.tmate.sock
-  pkill -f "tmate -S $S" >/dev/null 2>&1; rm -f $S
-  mkdir -p /root/.ssh && chmod 700 /root/.ssh
-  nohup tmate -S $S -F new-session -d "bash -l" > /tmp/diag.tmate.log 2>&1 &
-  for i in $(seq 1 20); do
-    sleep 2
-    OUT=$(tmate -S $S display -p "#{tmate_ssh}" 2>/dev/null)
-    case "$OUT" in ssh*) echo "SUCCESS: $OUT"; exit 0 ;; esac
+  for p in $PORT_LIST; do
+    echo "-- trying $TMATE_HOST:$p"
+    pkill -f "tmate -S $S" >/dev/null 2>&1; rm -f $S
+    mkdir -p /root/.ssh && chmod 700 /root/.ssh
+    printf "set -g tmate-server-host %s\nset -g tmate-server-port %s\n" "$TMATE_HOST" "$p" > /tmp/diag.tmate.conf
+    nohup tmate -f /tmp/diag.tmate.conf -S $S -F new-session -d "bash -l" > /tmp/diag.tmate.log 2>&1 &
+    for i in $(seq 1 8); do
+      sleep 2
+      OUT=$(tmate -S $S display -p "#{tmate_ssh}" 2>/dev/null)
+      case "$OUT" in ssh*) echo "SUCCESS on port $p: $OUT"; exit 0 ;; esac
+    done
+    echo "   failed on $p"; tail -n 5 /tmp/diag.tmate.log
   done
-  echo "FAILED - tmate log:"; tail -n 20 /tmp/diag.tmate.log
+  echo "FAILED on all ports ($PORT_LIST)"
 '

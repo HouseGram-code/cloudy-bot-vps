@@ -142,5 +142,23 @@ VPS_DNS = [s.strip() for s in os.getenv("VPS_DNS", "1.1.1.1,8.8.8.8").split(",")
 # How long to wait for a tmate session string before giving up (seconds)
 TMATE_TIMEOUT = int(os.getenv("TMATE_TIMEOUT", "90"))
 
+# ---------------------------------------------------------------------------
+# tmate relay
+# ---------------------------------------------------------------------------
+# Many hosts / firewalls only allow "normal" outbound ports, so tmate's default
+# TCP 2200 is blocked. ssh.tmate.io also accepts connections on 22 (and 443 on
+# most nodes), so we try several ports in order and use the first that works.
+TMATE_SERVER_HOST = os.getenv("TMATE_SERVER_HOST", "ssh.tmate.io")
+TMATE_PORTS = [
+    int(p.strip())
+    for p in os.getenv("TMATE_PORTS", "2200,22,443").split(",")
+    if p.strip().isdigit()
+] or [2200]
+
+# Only needed when TMATE_SERVER_HOST points at a self-hosted tmate-ssh-server.
+# Get them from that server's `tmate-ssh-server -h` output / install log.
+TMATE_RSA_FINGERPRINT = os.getenv("TMATE_RSA_FINGERPRINT", "").strip()
+TMATE_ED25519_FINGERPRINT = os.getenv("TMATE_ED25519_FINGERPRINT", "").strip()
+
 # Deployment animation speed (seconds per frame)
 ANIM_DELAY = float(os.getenv("ANIM_DELAY", "0.9"))

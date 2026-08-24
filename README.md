@@ -231,8 +231,8 @@ When a server is deployed (or you press **Get SSH**), the bot runs inside the
 guest container:
 
 ```bash
-tmate -S /tmp/cloudy.tmate.sock new-session -d 'bash -l'
-tmate -S /tmp/cloudy.tmate.sock wait tmate-ready
+printf 'set -g tmate-server-host ssh.tmate.io\nset -g tmate-server-port 2200\n' > /root/.tmate.conf
+nohup tmate -f /root/.tmate.conf -S /tmp/cloudy.tmate.sock -F new-session -d 'bash -l' &
 tmate -S /tmp/cloudy.tmate.sock display -p '#{tmate_ssh}'
 ```
 
@@ -240,6 +240,25 @@ The resulting `ssh xxxxx@nyc1.tmate.io` line is sent to the user. No port
 forwarding or public IP is needed, but the host **must have outbound internet
 access** to `tmate.io`. Stopping or restarting a server invalidates its session —
 press **Get SSH** again to obtain a fresh one.
+
+### Relay port fallback (fixes "Could not open a tmate session")
+
+tmate's default relay port is TCP **2200**, which a lot of providers and host
+firewalls block outright. The bot therefore probes every port in `TMATE_PORTS`
+(default `2200,22,443`), writes a matching `/root/.tmate.conf` inside the guest,
+and keeps the first port that actually produces a session. The port that worked
+is stored in the server record (`tmate_port`).
+
+```env
+TMATE_SERVER_HOST=ssh.tmate.io
+TMATE_PORTS=2200,22,443
+# self-hosted relay only:
+# TMATE_RSA_FINGERPRINT=
+# TMATE_ED25519_FINGERPRINT=
+```
+
+If every port is blocked, the error message now lists the ports that were tried
+plus the exact firewall commands to open one.
 
 ---
 
