@@ -1,10 +1,12 @@
-# Cloudy VPS Bot — v1.0 Beta
+# Cloudy VPS Bot — v1.1 Beta
 
 A Discord bot that hands out **free VPS** instances (Docker containers running
 **Ubuntu 22.04 LTS**) with **tmate SSH** access, a pretty deployment animation,
 and a button-based control panel.
 
-> Language: English UI (v1.0 Beta). Multi-language can be added later.
+> Languages: **Russian + English**. Every user picks their own with `!lang`
+> (stored in `data/languages.json`), and the guest login banner follows the
+> same choice via `CLOUDY_LANG`.
 
 ---
 
@@ -21,6 +23,7 @@ and a button-based control panel.
 | `!bans` | **Staff.** List of all bans with reason and moderator. |
 | `!servers` | **Staff.** All deployed servers and their owners. |
 | `!ping` | Latency check. |
+| `!lang` / `!язык` | Language picker (🇷🇺 Русский / 🇬🇧 English). Also `!lang ru`, `!lang en`. |
 | `!help` | Command list. |
 
 One VPS per Discord user by default (`MAX_VPS_PER_USER`).
@@ -257,8 +260,6 @@ TMATE_PORTS=2200,22,443
 # TMATE_ED25519_FINGERPRINT=
 ```
 
-If every port is blocked, the error message now lists the ports that were tried
-plus the exact firewall commands to open one.
 If every port is blocked, the error message now lists the ports that were tried,
 the **tmate log for each attempt**, and the exact firewall commands to open one.
 

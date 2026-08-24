@@ -122,7 +122,7 @@ class VPSManager:
     # ------------------------------------------------------------------
     # Create / control
     # ------------------------------------------------------------------
-    def _create_sync(self, user_id: int, username: str) -> dict:
+    def _create_sync(self, user_id: int, username: str, lang: str = "en") -> dict:
         if (
             MAX_VPS_PER_USER
             and not is_owner(user_id)
@@ -151,6 +151,12 @@ class VPSManager:
             # tmate needs a working resolver for ssh.tmate.io.
             dns=list(VPS_DNS) or None,
             security_opt=["no-new-privileges:true"],
+            # CLOUDY_LANG localizes the guest login banner (ru / en).
+            environment={
+                "TERM": "xterm-256color",
+                "LANG": "C.UTF-8",
+                "CLOUDY_LANG": "ru" if str(lang).startswith("ru") else "en",
+            },
             labels={
                 "cloudy.vps": "true",
                 "cloudy.owner": str(user_id),
@@ -184,9 +190,9 @@ class VPSManager:
         self._save_state()
         return record
 
-    async def create_vps(self, user_id: int, username: str) -> dict:
+    async def create_vps(self, user_id: int, username: str, lang: str = "en") -> dict:
         async with self._lock:
-            return await asyncio.to_thread(self._create_sync, user_id, username)
+            return await asyncio.to_thread(self._create_sync, user_id, username, lang)
 
     def _action_sync(self, user_id: int, action: str) -> None:
         container = self._container(user_id)

@@ -12,10 +12,20 @@ load_dotenv()
 # Bot identity
 # ---------------------------------------------------------------------------
 BOT_NAME = "Cloudy VPS Bot"
-BOT_VERSION = "1.0 Beta"
+BOT_VERSION = "1.1 Beta"
 BOT_FOOTER = f"{BOT_NAME} • v{BOT_VERSION}"
 
 COMMAND_PREFIX = os.getenv("COMMAND_PREFIX", "!")
+
+# ---------------------------------------------------------------------------
+# Language (RU / EN)
+# ---------------------------------------------------------------------------
+# DEFAULT_LANG is used until a user picks their own with `!lang`.
+# Each choice is stored in LANG_FILE so it survives restarts.
+DEFAULT_LANG = (os.getenv("DEFAULT_LANG", "en").lower() if os.getenv("DEFAULT_LANG") else "en")
+if DEFAULT_LANG not in ("en", "ru"):
+    DEFAULT_LANG = "en"
+LANG_FILE = os.getenv("LANG_FILE", "/app/data/languages.json")
 
 # The token ships with the project (obfuscated in token_store.py) so the bot
 # runs out of the box. An explicit DISCORD_TOKEN env var always takes priority.

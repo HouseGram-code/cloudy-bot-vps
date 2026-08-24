@@ -1,6 +1,6 @@
 """Cloudy VPS Bot - free VPS hosting from Discord.
 
-Version 1.0 Beta
+Version 1.1 Beta (bilingual RU / EN)
 """
 
 from __future__ import annotations
@@ -19,11 +19,13 @@ from config import (
     DISCORD_TOKEN,
     EMOJI,
     OWNER_IDS,
-    RULES,
     is_owner,
 )
+from i18n import LANGUAGES, LangStore, lang_label, normalize
+from i18n import rules as rules_for
+from i18n import t
 from moderation import BanStore, ModerationError
-from views import DeployView, ManageView
+from views import DeployView, LanguageView, ManageView
 from vps_manager import VPSError, VPSManager
 
 logging.basicConfig(
@@ -44,6 +46,13 @@ bot = commands.Bot(
 
 manager: VPSManager | None = None
 bans = BanStore()
+langs = LangStore()
+
+
+def lang_of(user: discord.abc.User | int | None) -> str:
+    """Language chosen by this user (falls back to DEFAULT_LANG)."""
+    uid = user if isinstance(user, int) else getattr(user, "id", None)
+    return langs.get(uid)
 
 
 class Banned(commands.CheckFailure):
@@ -110,27 +119,30 @@ async def _resolve_user_id(ctx: commands.Context, raw: str) -> tuple[int, str]:
 @commands.cooldown(1, 15, commands.BucketType.user)
 async def deploy(ctx: commands.Context) -> None:
     """Show the free plan specs and deploy a VPS."""
+    lang = lang_of(ctx.author)
     try:
         mgr = _require_manager()
         if await mgr.has_vps(ctx.author.id):
             info = await mgr.get_info(ctx.author.id)
-            view = ManageView(mgr, ctx.author.id, bans)
+            view = ManageView(mgr, ctx.author.id, bans, lang=lang)
             await view.refresh_buttons(info)
             msg = await ctx.reply(
-                content=f"{EMOJI['cloud']} You already own a VPS — here is your control panel.",
-                embed=embeds.manage_embed(info),
+                content=f"{EMOJI['cloud']} {t(lang, 'manage.already_own')}",
+                embed=embeds.manage_embed(info, lang),
                 view=view,
                 mention_author=False,
             )
             view.message = msg
             return
     except VPSError as exc:
-        await ctx.reply(embed=embeds.error_embed(str(exc)), mention_author=False)
+        await ctx.reply(
+            embed=embeds.error_embed(str(exc), lang=lang), mention_author=False
+        )
         return
 
-    view = DeployView(mgr, ctx.author.id, bans)
+    view = DeployView(mgr, ctx.author.id, bans, lang=lang)
     msg = await ctx.reply(
-        embed=embeds.deploy_offer_embed(ctx.author), view=view, mention_author=False
+        embed=embeds.deploy_offer_embed(ctx.author, lang), view=view, mention_author=False
     )
     view.message = msg
 
@@ -139,38 +151,87 @@ async def deploy(ctx: commands.Context) -> None:
 @commands.cooldown(1, 5, commands.BucketType.user)
 async def manage(ctx: commands.Context) -> None:
     """Server info + power controls."""
+    lang = lang_of(ctx.author)
     try:
         mgr = _require_manager()
         info = await mgr.get_info(ctx.author.id)
     except VPSError as exc:
-        await ctx.reply(embed=embeds.error_embed(str(exc)), mention_author=False)
+        await ctx.reply(
+            embed=embeds.error_embed(str(exc), lang=lang), mention_author=False
+        )
         return
 
-    view = ManageView(mgr, ctx.author.id, bans)
+    view = ManageView(mgr, ctx.author.id, bans, lang=lang)
     await view.refresh_buttons(info)
-    msg = await ctx.reply(embed=embeds.manage_embed(info), view=view, mention_author=False)
+    msg = await ctx.reply(
+        embed=embeds.manage_embed(info, lang), view=view, mention_author=False
+    )
     view.message = msg
 
 
 @bot.command(name="rules")
 async def rules_cmd(ctx: commands.Context) -> None:
-    await ctx.reply(embed=embeds.rules_embed(), mention_author=False)
+    await ctx.reply(embed=embeds.rules_embed(lang_of(ctx.author)), mention_author=False)
 
 
 @bot.command(name="help")
 async def help_cmd(ctx: commands.Context) -> None:
     await ctx.reply(
-        embed=embeds.help_embed(COMMAND_PREFIX, owner=is_owner(ctx.author.id)),
+        embed=embeds.help_embed(
+            COMMAND_PREFIX, owner=is_owner(ctx.author.id), lang=lang_of(ctx.author)
+        ),
         mention_author=False,
     )
 
 
+@bot.command(name="lang", aliases=["language", "\u044f\u0437\u044b\u043a", "lang\u0443"])
+async def lang_cmd(ctx: commands.Context, choice: str = "") -> None:
+    """!lang [ru|en] - switch the bot language, or open the picker."""
+    current = lang_of(ctx.author)
+
+    if choice:
+        wanted = choice.lower().strip()
+        aliases = {
+            "ru": "ru",
+            "rus": "ru",
+            "russian": "ru",
+            "\u0440\u0443\u0441": "ru",
+            "\u0440\u0443\u0441\u0441\u043a\u0438\u0439": "ru",
+            "en": "en",
+            "eng": "en",
+            "english": "en",
+            "\u0430\u043d\u0433": "en",
+            "\u0430\u043d\u0433\u043b\u0438\u0439\u0441\u043a\u0438\u0439": "en",
+        }
+        if wanted not in aliases:
+            await ctx.reply(
+                embed=embeds.error_embed(
+                    f"`{COMMAND_PREFIX}lang ru` \u2022 `{COMMAND_PREFIX}lang en`",
+                    lang=current,
+                ),
+                mention_author=False,
+            )
+            return
+        new_lang = langs.set(ctx.author.id, aliases[wanted])
+        await ctx.reply(
+            embed=embeds.language_changed_embed(new_lang), mention_author=False
+        )
+        return
+
+    view = LanguageView(ctx.author.id, langs, current)
+    msg = await ctx.reply(
+        embed=embeds.language_embed(current), view=view, mention_author=False
+    )
+    view.message = msg
+
+
 @bot.command(name="ping")
 async def ping(ctx: commands.Context) -> None:
+    lang = lang_of(ctx.author)
     await ctx.reply(
         embed=embeds.info_embed(
-            f"{EMOJI['spark']} Pong!",
-            f"Gateway latency: **{round(bot.latency * 1000)} ms**",
+            f"{EMOJI['spark']} {t(lang, 'ping.title')}",
+            t(lang, "ping.desc", ms=round(bot.latency * 1000)),
         ),
         mention_author=False,
     )
@@ -180,16 +241,19 @@ async def ping(ctx: commands.Context) -> None:
 @commands.cooldown(1, 30, commands.BucketType.user)
 async def destroy(ctx: commands.Context) -> None:
     """Permanently delete your VPS."""
+    lang = lang_of(ctx.author)
     try:
         mgr = _require_manager()
         await mgr.delete_vps(ctx.author.id)
     except VPSError as exc:
-        await ctx.reply(embed=embeds.error_embed(str(exc)), mention_author=False)
+        await ctx.reply(
+            embed=embeds.error_embed(str(exc), lang=lang), mention_author=False
+        )
         return
     await ctx.reply(
         embed=embeds.info_embed(
-            f"{EMOJI['check']} VPS destroyed",
-            "Your server and its disk were removed. You can `!deploy` a new one.",
+            f"{EMOJI['check']} {t(lang, 'destroy.title')}",
+            t(lang, "destroy.desc", prefix=COMMAND_PREFIX),
         ),
         mention_author=False,
     )
@@ -211,10 +275,13 @@ def owner_only():
 @owner_only()
 async def ban_cmd(ctx: commands.Context, target: str = "", *, reason: str = "") -> None:
     """!ban <@user|id> [reason] - block a user and stop their server."""
+    lang = lang_of(ctx.author)
     if not target:
         await ctx.reply(
             embed=embeds.error_embed(
-                f"Usage: `{COMMAND_PREFIX}ban <@user|id> [reason]`", title="Missing user"
+                t(lang, "help.usage_ban", prefix=COMMAND_PREFIX),
+                title=t(lang, "help.missing_user"),
+                lang=lang,
             ),
             mention_author=False,
         )
@@ -230,7 +297,9 @@ async def ban_cmd(ctx: commands.Context, target: str = "", *, reason: str = "") 
             user_name=user_name,
         )
     except ModerationError as exc:
-        await ctx.reply(embed=embeds.error_embed(str(exc)), mention_author=False)
+        await ctx.reply(
+            embed=embeds.error_embed(str(exc), lang=lang), mention_author=False
+        )
         return
 
     stopped = False
@@ -240,24 +309,27 @@ async def ban_cmd(ctx: commands.Context, target: str = "", *, reason: str = "") 
         except Exception as exc:  # pragma: no cover
             log.warning("could not stop server of %s: %s", user_id, exc)
 
-    # Tell the user privately why they lost access.
+    # Tell the user privately why they lost access (in *their* language).
     try:
         user = bot.get_user(user_id) or await bot.fetch_user(user_id)
-        await user.send(embed=embeds.banned_notice_embed(record))
+        await user.send(embed=embeds.banned_notice_embed(record, lang_of(user_id)))
     except discord.HTTPException:
         pass
 
-    await ctx.reply(embed=embeds.ban_embed(record, stopped), mention_author=False)
+    await ctx.reply(embed=embeds.ban_embed(record, stopped, lang), mention_author=False)
 
 
 @bot.command(name="unban")
 @owner_only()
 async def unban_cmd(ctx: commands.Context, target: str = "") -> None:
     """!unban <@user|id> - restore access."""
+    lang = lang_of(ctx.author)
     if not target:
         await ctx.reply(
             embed=embeds.error_embed(
-                f"Usage: `{COMMAND_PREFIX}unban <@user|id>`", title="Missing user"
+                f"`{COMMAND_PREFIX}unban <@user|id>`",
+                title=t(lang, "help.missing_user"),
+                lang=lang,
             ),
             mention_author=False,
         )
@@ -267,37 +339,46 @@ async def unban_cmd(ctx: commands.Context, target: str = "") -> None:
         user_id, _ = await _resolve_user_id(ctx, target)
         record = await bans.unban(user_id)
     except ModerationError as exc:
-        await ctx.reply(embed=embeds.error_embed(str(exc)), mention_author=False)
+        await ctx.reply(
+            embed=embeds.error_embed(str(exc), lang=lang), mention_author=False
+        )
         return
 
     try:
         user = bot.get_user(user_id) or await bot.fetch_user(user_id)
+        ulang = lang_of(user_id)
         await user.send(
             embed=embeds.info_embed(
-                f"{EMOJI['check']} You were unbanned",
-                f"You can use **{BOT_NAME}** again. Please follow the "
-                f"{len(RULES)} rules (`{COMMAND_PREFIX}rules`).",
+                f"{EMOJI['check']} {t(ulang, 'mod.unbanned_title')}",
+                t(ulang, "help.rules", count=len(rules_for(ulang)))
+                + f"\n`{COMMAND_PREFIX}rules`",
             )
         )
     except discord.HTTPException:
         pass
 
-    await ctx.reply(embed=embeds.unban_embed(record), mention_author=False)
+    await ctx.reply(embed=embeds.unban_embed(record, lang), mention_author=False)
 
 
 @bot.command(name="bans")
 @owner_only()
 async def bans_cmd(ctx: commands.Context) -> None:
-    await ctx.reply(embed=embeds.bans_list_embed(bans.all_bans()), mention_author=False)
+    await ctx.reply(
+        embed=embeds.bans_list_embed(bans.all_bans(), lang_of(ctx.author)),
+        mention_author=False,
+    )
 
 
 @bot.command(name="servers")
 @owner_only()
 async def servers_cmd(ctx: commands.Context) -> None:
+    lang = lang_of(ctx.author)
     try:
         mgr = _require_manager()
     except VPSError as exc:
-        await ctx.reply(embed=embeds.error_embed(str(exc)), mention_author=False)
+        await ctx.reply(
+            embed=embeds.error_embed(str(exc), lang=lang), mention_author=False
+        )
         return
 
     records = mgr.all_records()
@@ -309,7 +390,7 @@ async def servers_cmd(ctx: commands.Context) -> None:
         return
 
     lines = [
-        f"`{r['name']}` • <@{r['owner_id']}> • {r['ram_mb']} MB • "
+        f"`{r['name']}` \u2022 <@{r['owner_id']}> \u2022 {r['ram_mb']} MB \u2022 "
         f"<t:{int(r['created_ts'])}:R>"
         for r in records[:25]
     ]
@@ -329,14 +410,18 @@ async def on_command_error(ctx: commands.Context, error: Exception) -> None:
     if isinstance(error, commands.CommandNotFound):
         return
 
+    lang = lang_of(ctx.author)
+
     if isinstance(error, Banned):
         record = bans.get(ctx.author.id) or {}
         try:
-            await ctx.author.send(embed=embeds.banned_notice_embed(record))
+            await ctx.author.send(embed=embeds.banned_notice_embed(record, lang))
         except discord.HTTPException:
             await ctx.reply(
                 embed=embeds.error_embed(
-                    "You are banned from using this bot.", title="Access denied"
+                    t(lang, "mod.you_banned_desc"),
+                    title=t(lang, "mod.you_banned_title"),
+                    lang=lang,
                 ),
                 mention_author=False,
             )
@@ -345,7 +430,7 @@ async def on_command_error(ctx: commands.Context, error: Exception) -> None:
     if isinstance(error, commands.CheckFailure):
         await ctx.reply(
             embed=embeds.error_embed(
-                "This command is for bot staff only.", title="Access denied"
+                t(lang, "help.staff"), title=t(lang, "generic.error_title"), lang=lang
             ),
             mention_author=False,
         )
@@ -354,15 +439,14 @@ async def on_command_error(ctx: commands.Context, error: Exception) -> None:
     if isinstance(error, commands.CommandOnCooldown):
         await ctx.reply(
             embed=embeds.error_embed(
-                f"Slow down — try again in **{error.retry_after:.0f}s**.",
-                title="On cooldown",
+                f"\u23F3 **{error.retry_after:.0f}s**", lang=lang
             ),
             mention_author=False,
         )
         return
 
     log.exception("command error", exc_info=error)
-    await ctx.reply(embed=embeds.error_embed(f"`{error}`"), mention_author=False)
+    await ctx.reply(embed=embeds.error_embed(f"`{error}`", lang=lang), mention_author=False)
 
 
 def main() -> None:
