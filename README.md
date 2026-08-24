@@ -54,6 +54,7 @@ cloudy-vps-bot/
 ├── requirements.txt
 ├── Dockerfile                   # the bot image (python:3.12-slim)
 ├── docker-compose.yml
+├── start.sh                     # one-command build + run (creates .env if missing)
 ├── .env / .env.example
 └── images/
     └── ubuntu-22.04/Dockerfile  # the guest "VPS" image (ubuntu:22.04 + tmate)
@@ -99,9 +100,30 @@ python3 tools/scan_secrets.py
 ### 5. Run the bot
 
 ```bash
+chmod +x start.sh
+./start.sh          # builds the guest image + starts the bot
+./start.sh logs     # follow the logs
+```
+
+Or with plain Compose:
+
+```bash
 docker compose up -d --build
 docker compose logs -f
 ```
+
+> **`env file /root/... /.env not found`?**
+> `.env` is gitignored, so a fresh `git clone` has no `.env`. The bot does not
+> need one (token is bundled, all plan values have defaults). Either run
+> `./start.sh`, which creates it automatically, or:
+>
+> ```bash
+> cp .env.example .env
+> docker compose up -d --build
+> ```
+>
+> `docker-compose.yml` already marks the env file as `required: false`, which
+> needs Compose **v2.24+** (`docker compose version` to check).
 
 Or without Docker:
 

@@ -4,8 +4,15 @@ services:
     image: cloudy-vps-bot:1.0-beta
     container_name: cloudy-vps-bot
     restart: unless-stopped
+
+    # .env is OPTIONAL: the token is bundled in token_store.py and every plan
+    # value has a default in config.py. Requires Compose v2.24+ for
+    # "required: false"; on older versions run `cp .env.example .env` first
+    # (or just use ./start.sh, which handles it automatically).
     env_file:
-      - .env
+      - path: .env
+        required: false
+
     volumes:
       # The bot creates the "VPS" containers through the host Docker daemon.
       - /var/run/docker.sock:/var/run/docker.sock
