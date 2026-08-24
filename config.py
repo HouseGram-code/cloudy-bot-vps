@@ -16,9 +16,67 @@ BOT_VERSION = "1.0 Beta"
 BOT_FOOTER = f"{BOT_NAME} • v{BOT_VERSION}"
 
 COMMAND_PREFIX = os.getenv("COMMAND_PREFIX", "!")
+
 # The token ships with the project (obfuscated in token_store.py) so the bot
 # runs out of the box. An explicit DISCORD_TOKEN env var always takes priority.
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN") or get_builtin_token()
+
+# ---------------------------------------------------------------------------
+# Staff / owners
+# ---------------------------------------------------------------------------
+# Owners can always use every command, can never be banned, and bypass limits.
+DEFAULT_OWNERS = [1264586393594630239]
+
+
+def _parse_ids(raw: str) -> list[int]:
+    out = []
+    for part in raw.replace(";", ",").split(","):
+        part = part.strip()
+        if part.isdigit():
+            out.append(int(part))
+    return out
+
+
+OWNER_IDS = _parse_ids(os.getenv("OWNER_IDS", "")) or DEFAULT_OWNERS
+
+
+def is_owner(user_id: int) -> bool:
+    return int(user_id) in OWNER_IDS
+
+
+# ---------------------------------------------------------------------------
+# Privacy
+# ---------------------------------------------------------------------------
+# SSH credentials are NEVER posted in a channel. They are sent to the user's
+# direct messages; if DMs are closed the bot falls back to an ephemeral reply
+# that only that user can see.
+SSH_TO_DM_ONLY = os.getenv("SSH_TO_DM_ONLY", "1") not in ("0", "false", "False")
+
+# ---------------------------------------------------------------------------
+# Rules (max 5) - shown by !rules and before every deployment
+# ---------------------------------------------------------------------------
+RULES: list[tuple[str, str]] = [
+    (
+        "One free server per person",
+        "Alt accounts to farm extra servers are not allowed. Duplicates get removed.",
+    ),
+    (
+        "No attacks or abuse",
+        "No DDoS, port scanning, brute force, spam, phishing or proxy/VPN services.",
+    ),
+    (
+        "No crypto mining or resource farming",
+        "Miners, stress tests and 100% CPU loops are killed and the account is banned.",
+    ),
+    (
+        "No illegal content",
+        "Nothing pirated, stolen, malicious, or against Discord's Terms of Service.",
+    ),
+    (
+        "Free tier is best effort",
+        "Servers may be restarted, wiped or removed at any time. Keep your own backups.",
+    ),
+][:5]
 
 # ---------------------------------------------------------------------------
 # Colors / emojis (visual style)
@@ -46,6 +104,11 @@ EMOJI = {
     "check": "\u2705",
     "cross": "\u274C",
     "spark": "\u2728",
+    "lock": "\U0001F512",
+    "mail": "\U0001F4EC",
+    "scroll": "\U0001F4DC",
+    "hammer": "\U0001F528",
+    "shield": "\U0001F6E1\ufe0f",
 }
 
 # ---------------------------------------------------------------------------
@@ -71,9 +134,13 @@ VPS_IMAGE = os.getenv("VPS_IMAGE", "cloudy-vps:ubuntu-22.04")
 CONTAINER_PREFIX = os.getenv("CONTAINER_PREFIX", "cloudy-vps")
 MAX_VPS_PER_USER = int(os.getenv("MAX_VPS_PER_USER", "1"))
 STATE_FILE = os.getenv("STATE_FILE", "/app/data/vps_state.json")
+BAN_FILE = os.getenv("BAN_FILE", "/app/data/bans.json")
+
+# DNS servers given to guest containers so tmate.io always resolves.
+VPS_DNS = [s.strip() for s in os.getenv("VPS_DNS", "1.1.1.1,8.8.8.8").split(",") if s.strip()]
 
 # How long to wait for a tmate session string before giving up (seconds)
-TMATE_TIMEOUT = int(os.getenv("TMATE_TIMEOUT", "60"))
+TMATE_TIMEOUT = int(os.getenv("TMATE_TIMEOUT", "90"))
 
 # Deployment animation speed (seconds per frame)
 ANIM_DELAY = float(os.getenv("ANIM_DELAY", "0.9"))

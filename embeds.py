@@ -17,6 +17,7 @@ from config import (
     COLOR_WARNING,
     EMOJI,
     PLAN,
+    RULES,
 )
 
 FILLED = "\u2588"
@@ -49,8 +50,6 @@ def status_badge(status: str) -> str:
         return f"{EMOJI['online']} **Online**"
     if status in ("exited", "created", "dead"):
         return f"{EMOJI['offline']} **Offline**"
-    if status in ("restarting", "paused"):
-        return f"{EMOJI['pending']} **{status.capitalize()}**"
     return f"{EMOJI['pending']} **{status.capitalize()}**"
 
 
@@ -58,6 +57,23 @@ def _footer(embed: discord.Embed) -> discord.Embed:
     embed.set_footer(text=BOT_FOOTER)
     embed.timestamp = dt.datetime.now(dt.timezone.utc)
     return embed
+
+
+# ---------------------------------------------------------------------------
+# Rules
+# ---------------------------------------------------------------------------
+def rules_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title=f"{EMOJI['scroll']} Free VPS — Rules",
+        description=(
+            "By deploying a server you agree to all of the rules below.\n"
+            "Breaking any of them means an instant **ban** and server removal."
+        ),
+        color=COLOR_PRIMARY,
+    )
+    for i, (title, detail) in enumerate(RULES, 1):
+        embed.add_field(name=f"`{i}.` {title}", value=detail, inline=False)
+    return _footer(embed)
 
 
 # ---------------------------------------------------------------------------
@@ -101,12 +117,25 @@ def deploy_offer_embed(user: discord.abc.User) -> discord.Embed:
     )
     embed.add_field(
         name=f"{EMOJI['key']} Access",
-        value="**tmate SSH**\n`root user`",
+        value="**tmate SSH**\n`sent to your DMs`",
         inline=True,
     )
     embed.add_field(
         name=f"{EMOJI['spark']} Plan",
         value=f"`{PLAN['name']}` • Location: `{PLAN['location']}`",
+        inline=False,
+    )
+    embed.add_field(
+        name=f"{EMOJI['scroll']} Rules",
+        value=(
+            f"Pressing **Start** means you accept all **{len(RULES)} rules**.\n"
+            "Press **Rules** to read them first."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name=f"{EMOJI['lock']} Privacy",
+        value="Your SSH command is **never posted in a channel** — only in your DMs.",
         inline=False,
     )
     return _footer(embed)
@@ -127,12 +156,13 @@ def deploy_progress_embed(stage_label: str, percent: int, log_lines: list[str]) 
     return _footer(embed)
 
 
-def deploy_success_embed(info: dict, ssh: str | None) -> discord.Embed:
+def deploy_success_embed(info: dict, ssh_status: str) -> discord.Embed:
+    """Public success card. Never contains the SSH command."""
     embed = discord.Embed(
         title=f"{EMOJI['check']} VPS deployed successfully!",
         description=(
             "Your free VPS is **online** and ready to use.\n"
-            f"Manage it any time with `!manage`."
+            "Manage it any time with `!manage`."
         ),
         color=COLOR_SUCCESS,
     )
@@ -140,62 +170,77 @@ def deploy_success_embed(info: dict, ssh: str | None) -> discord.Embed:
     embed.add_field(name="Hostname", value=f"`{info['name']}`", inline=True)
     embed.add_field(name="Status", value=status_badge(info["status"]), inline=True)
 
+    embed.add_field(name=f"{EMOJI['ram']} RAM", value=f"**{info['ram_limit_mb']} MB**", inline=True)
+    embed.add_field(name=f"{EMOJI['cpu']} vCPU", value=f"**{info['cpu_limit']:g}**", inline=True)
+    embed.add_field(name=f"{EMOJI['disk']} Disk", value=f"**{info['disk_gb']} GB**", inline=True)
+    embed.add_field(name=f"{EMOJI['os']} OS", value=f"**{info['os']}**", inline=True)
     embed.add_field(
-        name=f"{EMOJI['ram']} RAM",
-        value=f"**{info['ram_limit_mb']} MB**",
-        inline=True,
+        name=f"{EMOJI['net']} Bandwidth", value=f"**{info['bandwidth']}**", inline=True
     )
     embed.add_field(
-        name=f"{EMOJI['cpu']} vCPU",
-        value=f"**{info['cpu_limit']:g}**",
-        inline=True,
+        name=f"{EMOJI['clock']} Created", value=f"<t:{int(info['created_ts'])}:R>", inline=True
     )
     embed.add_field(
-        name=f"{EMOJI['disk']} Disk",
-        value=f"**{info['disk_gb']} GB**",
-        inline=True,
+        name=f"{EMOJI['key']} SSH access (tmate)", value=ssh_status, inline=False
     )
-    embed.add_field(
-        name=f"{EMOJI['os']} OS",
-        value=f"**{info['os']}**",
-        inline=True,
-    )
-    embed.add_field(
-        name=f"{EMOJI['net']} Bandwidth",
-        value=f"**{info['bandwidth']}**",
-        inline=True,
-    )
-    embed.add_field(
-        name=f"{EMOJI['clock']} Created",
-        value=f"<t:{int(info['created_ts'])}:R>",
-        inline=True,
-    )
-
-    if ssh:
-        embed.add_field(
-            name=f"{EMOJI['key']} SSH access (tmate)",
-            value=f"```bash\n{ssh}\n```Paste this in your terminal to connect as `root`.",
-            inline=False,
-        )
-    else:
-        embed.add_field(
-            name=f"{EMOJI['key']} SSH access (tmate)",
-            value="Session is still starting. Run `!manage` → **Get SSH** in a moment.",
-            inline=False,
-        )
     return _footer(embed)
+
+
+# ---------------------------------------------------------------------------
+# SSH (DM only)
+# ---------------------------------------------------------------------------
+def ssh_dm_embed(info: dict, ssh: str) -> discord.Embed:
+    embed = discord.Embed(
+        title=f"{EMOJI['key']} Your VPS — SSH access",
+        description=(
+            f"Server **{info['name']}** • `{info['short_id']}`\n\n"
+            "Paste this in your terminal to connect as `root`:\n"
+            f"```bash\n{ssh}\n```"
+        ),
+        color=COLOR_SUCCESS,
+    )
+    embed.add_field(
+        name=f"{EMOJI['os']} System",
+        value=f"{info['os']} • {info['ram_limit_mb']} MB RAM • "
+        f"{info['cpu_limit']:g} vCPU • {info['disk_gb']} GB",
+        inline=False,
+    )
+    embed.add_field(
+        name=f"{EMOJI['lock']} Keep it private",
+        value=(
+            "Anyone with this line gets **full root access** to your server.\n"
+            "Stopping or restarting the VPS invalidates it — press **Get SSH** in "
+            "`!manage` for a fresh one."
+        ),
+        inline=False,
+    )
+    return _footer(embed)
+
+
+def dm_failed_embed() -> discord.Embed:
+    return _footer(
+        discord.Embed(
+            title=f"{EMOJI['mail']} I cannot DM you",
+            description=(
+                "Your SSH command is only ever sent privately, but your DMs are closed.\n\n"
+                "**Fix it:** Server settings → *Privacy Settings* → enable "
+                "**Direct Messages**, then press **Get SSH** again."
+            ),
+            color=COLOR_WARNING,
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
 # !manage
 # ---------------------------------------------------------------------------
-def manage_embed(info: dict, ssh: str | None = None) -> discord.Embed:
+def manage_embed(info: dict) -> discord.Embed:
     running = info["status"] == "running"
     embed = discord.Embed(
         title=f"{EMOJI['gear']} VPS Control Panel",
         description=(
             f"**{info['name']}** • {status_badge(info['status'])}\n"
-            f"Use the buttons below to control your server."
+            "Use the buttons below to control your server."
         ),
         color=COLOR_SUCCESS if running else COLOR_NEUTRAL,
     )
@@ -248,16 +293,83 @@ def manage_embed(info: dict, ssh: str | None = None) -> discord.Embed:
         value=f"**{human_uptime(info['uptime_seconds'])}**" if running else "`—`",
         inline=True,
     )
+    embed.add_field(name="Created", value=f"<t:{int(info['created_ts'])}:D>", inline=True)
     embed.add_field(
-        name="Created", value=f"<t:{int(info['created_ts'])}:D>", inline=True
+        name=f"{EMOJI['key']} SSH access (tmate)",
+        value=(
+            f"Press **Get SSH** — the command is sent to your **DMs** only."
+            if running
+            else "Start the server first, then press **Get SSH**."
+        ),
+        inline=False,
     )
+    return _footer(embed)
 
-    if ssh:
+
+# ---------------------------------------------------------------------------
+# Moderation
+# ---------------------------------------------------------------------------
+def ban_embed(record: dict, vps_stopped: bool) -> discord.Embed:
+    embed = discord.Embed(
+        title=f"{EMOJI['hammer']} User banned",
+        description=f"<@{record['user_id']}> can no longer use the bot.",
+        color=COLOR_ERROR,
+    )
+    embed.add_field(name="User ID", value=f"`{record['user_id']}`", inline=True)
+    embed.add_field(name="Moderator", value=f"<@{record['moderator_id']}>", inline=True)
+    embed.add_field(name="Reason", value=record["reason"], inline=False)
+    embed.add_field(
+        name="Server",
+        value="Stopped automatically" if vps_stopped else "No running server",
+        inline=False,
+    )
+    return _footer(embed)
+
+
+def unban_embed(record: dict) -> discord.Embed:
+    embed = discord.Embed(
+        title=f"{EMOJI['check']} User unbanned",
+        description=f"<@{record['user_id']}> can use the bot again.",
+        color=COLOR_SUCCESS,
+    )
+    embed.add_field(name="User ID", value=f"`{record['user_id']}`", inline=True)
+    embed.add_field(name="Previous reason", value=record.get("reason", "—"), inline=False)
+    return _footer(embed)
+
+
+def bans_list_embed(bans: list[dict]) -> discord.Embed:
+    embed = discord.Embed(
+        title=f"{EMOJI['shield']} Ban list",
+        description=f"**{len(bans)}** banned user(s)." if bans else "Nobody is banned.",
+        color=COLOR_NEUTRAL,
+    )
+    for record in bans[:20]:
+        name = record.get("user_name") or f"User {record['user_id']}"
         embed.add_field(
-            name=f"{EMOJI['key']} SSH access (tmate)",
-            value=f"```bash\n{ssh}\n```",
+            name=f"{name} • `{record['user_id']}`",
+            value=(
+                f"Reason: {record.get('reason', '—')}\n"
+                f"By <@{record.get('moderator_id', 0)}> • "
+                f"<t:{int(record.get('ts', 0))}:R>"
+            ),
             inline=False,
         )
+    return _footer(embed)
+
+
+def banned_notice_embed(record: dict) -> discord.Embed:
+    embed = discord.Embed(
+        title=f"{EMOJI['hammer']} You are banned",
+        description=(
+            "You can no longer deploy or manage servers with this bot.\n"
+            "Contact the staff if you think this is a mistake."
+        ),
+        color=COLOR_ERROR,
+    )
+    embed.add_field(name="Reason", value=record.get("reason", "—"), inline=False)
+    embed.add_field(
+        name="Banned", value=f"<t:{int(record.get('ts', 0))}:R>", inline=True
+    )
     return _footer(embed)
 
 
@@ -272,13 +384,13 @@ def error_embed(description: str, title: str = "Something went wrong") -> discor
     return _footer(
         discord.Embed(
             title=f"{EMOJI['cross']} {title}",
-            description=description,
+            description=description[:4000],
             color=COLOR_ERROR,
         )
     )
 
 
-def help_embed(prefix: str) -> discord.Embed:
+def help_embed(prefix: str, owner: bool = False) -> discord.Embed:
     embed = discord.Embed(
         title=f"{EMOJI['cloud']} {BOT_NAME}",
         description=f"Free VPS hosting, right from Discord.\nVersion **{BOT_VERSION}**",
@@ -295,8 +407,17 @@ def help_embed(prefix: str) -> discord.Embed:
         inline=False,
     )
     embed.add_field(
-        name=f"`{prefix}ping`",
-        value="Check bot latency.",
-        inline=False,
+        name=f"`{prefix}rules`", value=f"The {len(RULES)} rules of the free tier.", inline=False
     )
+    embed.add_field(name=f"`{prefix}destroy`", value="Delete your VPS.", inline=False)
+    embed.add_field(name=f"`{prefix}ping`", value="Check bot latency.", inline=False)
+    if owner:
+        embed.add_field(
+            name=f"{EMOJI['shield']} Staff only",
+            value=(
+                f"`{prefix}ban <@user|id> [reason]` • `{prefix}unban <@user|id>`\n"
+                f"`{prefix}bans` • `{prefix}servers`"
+            ),
+            inline=False,
+        )
     return _footer(embed)

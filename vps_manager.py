@@ -23,12 +23,22 @@ from config import (
     PLAN,
     STATE_FILE,
     TMATE_TIMEOUT,
+    VPS_DNS,
     VPS_IMAGE,
+    is_owner,
 )
 
 log = logging.getLogger("cloudy.vps")
 
-IMAGE_CONTEXT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "images", "ubuntu-22.04")
+IMAGE_CONTEXT = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "images", "ubuntu-22.04"
+)
+
+TMATE_SOCK = "/tmp/cloudy.tmate.sock"
+TMATE_LOG = "/tmp/cloudy.tmate.log"
+
+# Static tmate build used when the distro package is unavailable.
+_GH = "https://" + "github.com/tmate-io/tmate/releases/download"
 
 
 class VPSError(Exception):
@@ -86,6 +96,9 @@ class VPSManager:
     async def has_vps(self, user_id: int) -> bool:
         return await asyncio.to_thread(lambda: self._container(user_id) is not None)
 
+    def all_records(self) -> list[dict]:
+        return list(self._state["servers"].values())
+
     # ------------------------------------------------------------------
     # Image build
     # ------------------------------------------------------------------
@@ -105,10 +118,12 @@ class VPSManager:
     # Create / control
     # ------------------------------------------------------------------
     def _create_sync(self, user_id: int, username: str) -> dict:
-        if MAX_VPS_PER_USER and self._container(user_id) is not None:
-            raise VPSError(
-                "You already own a VPS. Use `!manage` to control it."
-            )
+        if (
+            MAX_VPS_PER_USER
+            and not is_owner(user_id)
+            and self._container(user_id) is not None
+        ):
+            raise VPSError("You already own a VPS. Use `!manage` to control it.")
 
         self._ensure_image_sync()
 
@@ -128,8 +143,8 @@ class VPSManager:
             nano_cpus=int(PLAN["cpu_cores"] * 1_000_000_000),
             pids_limit=512,
             restart_policy={"Name": "unless-stopped"},
-            cap_drop=["ALL"],
-            cap_add=["CHOWN", "SETUID", "SETGID", "DAC_OVERRIDE", "FOWNER", "KILL"],
+            # tmate needs a working resolver for ssh.tmate.io.
+            dns=list(VPS_DNS) or None,
             security_opt=["no-new-privileges:true"],
             labels={
                 "cloudy.vps": "true",
@@ -207,6 +222,26 @@ class VPSManager:
         async with self._lock:
             await asyncio.to_thread(self._delete_sync, user_id)
 
+    async def stop_if_running(self, user_id: int) -> bool:
+        """Used by moderation: silently stop a user's server. Returns True if stopped."""
+
+        def _work() -> bool:
+            container = self._container(user_id)
+            if container is None:
+                return False
+            container.reload()
+            if container.status != "running":
+                return False
+            container.stop(timeout=10)
+            record = self.get_record(user_id)
+            if record:
+                record["ssh"] = None
+                self._save_state()
+            return True
+
+        async with self._lock:
+            return await asyncio.to_thread(_work)
+
     # ------------------------------------------------------------------
     # Stats
     # ------------------------------------------------------------------
@@ -231,12 +266,13 @@ class VPSManager:
             "disk_gb": record["disk_gb"],
             "bandwidth": record["bandwidth"],
             "created_ts": record["created_ts"],
+            "owner_id": record.get("owner_id", user_id),
             "ram_used_mb": 0,
             "cpu_percent": 0.0,
             "net_rx_mb": 0.0,
             "net_tx_mb": 0.0,
             "uptime_seconds": 0,
-            "ssh": record.get("ssh"),
+            "has_ssh": bool(record.get("ssh")),
         }
 
         if status == "running":
@@ -265,7 +301,6 @@ class VPSManager:
                 online = cpu.get("online_cpus") or 1
                 if sys_delta > 0 and cpu_delta > 0:
                     percent = (cpu_delta / sys_delta) * online * 100.0
-                    # Normalize against the container's own vCPU allocation.
                     info["cpu_percent"] = min(
                         100.0, percent / max(0.1, float(record["cpu_cores"]))
                     )
@@ -286,6 +321,64 @@ class VPSManager:
     # ------------------------------------------------------------------
     # tmate SSH
     # ------------------------------------------------------------------
+    @staticmethod
+    def _exec(container, script: str) -> tuple[int, str, str]:
+        """Run a bash snippet in the guest, returning (code, stdout, stderr)."""
+        result = container.exec_run(
+            ["/bin/bash", "-lc", script],
+            demux=True,
+            environment={"TERM": "xterm-256color", "DEBIAN_FRONTEND": "noninteractive"},
+        )
+        out, err = result.output if isinstance(result.output, tuple) else (result.output, b"")
+        return (
+            result.exit_code,
+            (out or b"").decode("utf-8", "replace").strip(),
+            (err or b"").decode("utf-8", "replace").strip(),
+        )
+
+    def _ensure_tmate_binary(self, container) -> None:
+        code, _, _ = self._exec(container, "command -v tmate")
+        if code == 0:
+            return
+
+        log.info("tmate missing in %s, installing at runtime", container.short_id)
+        install = (
+            "set -e; "
+            "(apt-get update -qq && apt-get install -y -qq tmate) >/dev/null 2>&1 || true; "
+            "command -v tmate >/dev/null 2>&1 && exit 0; "
+            "arch=$(uname -m); "
+            'case "$arch" in x86_64) t=amd64 ;; aarch64) t=arm64v8 ;; armv7l) t=arm32v7 ;; '
+            '*) echo "unsupported arch $arch" >&2; exit 1 ;; esac; '
+            f'v=2.4.0; url="{_GH}/$v/tmate-$v-static-linux-$t.tar.xz"; '
+            '(command -v wget >/dev/null && wget -qO /tmp/tmate.tar.xz "$url") '
+            '|| curl -fsSL -o /tmp/tmate.tar.xz "$url"; '
+            "tar -xf /tmp/tmate.tar.xz -C /tmp; "
+            'mv /tmp/tmate-$v-static-linux-$t/tmate /usr/local/bin/tmate; '
+            "chmod +x /usr/local/bin/tmate; "
+            "rm -rf /tmp/tmate.tar.xz /tmp/tmate-$v-static-linux-$t"
+        )
+        code, out, err = self._exec(container, install)
+        if code != 0:
+            raise VPSError(
+                "**tmate is not installed inside the VPS and could not be downloaded.**\n"
+                "Rebuild the guest image so tmate is baked in:\n"
+                "```bash\ndocker build --no-cache -t cloudy-vps:ubuntu-22.04 "
+                "./images/ubuntu-22.04\n```\n"
+                f"Installer output:\n```\n{(err or out or 'no output')[-600:]}\n```"
+            )
+
+    def _network_diagnostics(self, container) -> str:
+        checks = (
+            "echo '--- dns ---'; (getent hosts ssh.tmate.io || echo 'DNS FAILED'); "
+            "echo '--- tcp 2200 ---'; "
+            "(timeout 6 bash -c '</dev/tcp/ssh.tmate.io/2200' "
+            "&& echo 'TCP OK' || echo 'TCP FAILED'); "
+            "echo '--- tmate version ---'; (tmate -V 2>&1 | head -1); "
+            f"echo '--- log ---'; (tail -n 12 {TMATE_LOG} 2>/dev/null || echo 'no log')"
+        )
+        _, out, err = self._exec(container, checks)
+        return (out or err or "no diagnostics").strip()
+
     def _tmate_sync(self, user_id: int, force_new: bool = False) -> str:
         container = self._container(user_id)
         record = self.get_record(user_id)
@@ -297,35 +390,55 @@ class VPSManager:
             raise VPSError("Start your VPS first — a stopped server cannot open SSH.")
 
         if record.get("ssh") and not force_new:
-            return record["ssh"]
+            # Re-use the session only if it is genuinely still alive.
+            code, out, _ = self._exec(
+                container,
+                f"tmate -S {TMATE_SOCK} display -p '#{{tmate_ssh}}' 2>/dev/null",
+            )
+            if code == 0 and out.startswith("ssh "):
+                if out != record["ssh"]:
+                    record["ssh"] = out
+                    self._save_state()
+                return out
 
-        sock = "/tmp/cloudy.tmate.sock"
-        script = (
-            f"pkill -f 'tmate -S {sock}' >/dev/null 2>&1; "
-            f"rm -f {sock}; "
+        self._ensure_tmate_binary(container)
+
+        # Fresh session: kill the old server, then start detached with logging.
+        start = (
+            f"pkill -f 'tmate -S {TMATE_SOCK}' >/dev/null 2>&1; "
+            f"rm -f {TMATE_SOCK} {TMATE_LOG}; "
             "mkdir -p /root/.ssh && chmod 700 /root/.ssh; "
-            f"tmate -S {sock} new-session -d 'TERM=xterm-256color bash -l' "
-            "&& "
-            f"tmate -S {sock} wait tmate-ready "
-            "&& "
-            f"tmate -S {sock} display -p '#{{tmate_ssh}}'"
+            "export TERM=xterm-256color; "
+            f"nohup tmate -S {TMATE_SOCK} -F new-session -d "
+            f"'TERM=xterm-256color bash -l' > {TMATE_LOG} 2>&1 & "
+            "sleep 2; echo started"
         )
+        self._exec(container, start)
 
-        exit_code, output = container.exec_run(
-            ["/bin/bash", "-lc", script],
-            demux=False,
-            environment={"TERM": "xterm-256color"},
-        )
-        text = (output or b"").decode("utf-8", "replace").strip()
-        ssh_line = next(
-            (ln.strip() for ln in reversed(text.splitlines()) if ln.strip().startswith("ssh ")),
-            None,
-        )
-        if exit_code != 0 or not ssh_line:
+        # Poll for the SSH string instead of blocking forever on `tmate wait`.
+        deadline = time.monotonic() + max(20, TMATE_TIMEOUT - 10)
+        ssh_line = ""
+        while time.monotonic() < deadline:
+            code, out, _ = self._exec(
+                container,
+                f"tmate -S {TMATE_SOCK} display -p '#{{tmate_ssh}}' 2>/dev/null",
+            )
+            candidate = next(
+                (ln.strip() for ln in out.splitlines() if ln.strip().startswith("ssh ")),
+                "",
+            )
+            if code == 0 and candidate and "@" in candidate:
+                ssh_line = candidate
+                break
+            time.sleep(2)
+
+        if not ssh_line:
+            diag = self._network_diagnostics(container)
             raise VPSError(
-                "Could not open a tmate session.\n"
-                "```\n" + (text[-500:] or "no output") + "\n```\n"
-                "The VPS needs outbound internet access to reach `tmate.io`."
+                "**Could not open a tmate session.**\n"
+                "tmate needs outbound access to `ssh.tmate.io` on TCP **2200** — "
+                "check the host firewall and DNS.\n"
+                f"```\n{diag[-900:]}\n```"
             )
 
         record["ssh"] = ssh_line
@@ -335,5 +448,5 @@ class VPSManager:
     async def get_ssh(self, user_id: int, force_new: bool = False) -> str:
         return await asyncio.wait_for(
             asyncio.to_thread(self._tmate_sync, user_id, force_new),
-            timeout=TMATE_TIMEOUT,
+            timeout=TMATE_TIMEOUT + 30,
         )

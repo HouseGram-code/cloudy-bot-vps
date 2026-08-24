@@ -35,8 +35,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # ---- tmate (SSH access without port forwarding) ----
+# 1) try the distro package (Ubuntu 22.04 universe ships tmate)
+RUN apt-get update \
+    && (apt-get install -y --no-install-recommends tmate \
+        || echo "tmate not available via apt, falling back to static build") \
+    && rm -rf /var/lib/apt/lists/*
+
+# 2) fall back to the official static build if apt did not provide it
 ARG TMATE_VERSION=2.4.0
 RUN set -eux; \
+    if command -v tmate >/dev/null 2>&1; then echo "tmate already installed"; exit 0; fi; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
         amd64) tarch="amd64" ;; \
@@ -63,6 +71,9 @@ RUN printf '%s\n' \
 
 RUN echo 'cat /etc/motd' >> /root/.bashrc \
     && echo 'cd /root' >> /root/.bashrc
+
+# Verify tmate really made it into the image (fail the build early if not)
+RUN tmate -V
 
 WORKDIR /root
 

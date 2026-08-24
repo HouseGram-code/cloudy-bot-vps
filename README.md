@@ -14,7 +14,12 @@ and a button-based control panel.
 |---|---|
 | `!deploy` | Shows the free plan specs (RAM, swap, vCPU, disk, OS, bandwidth, access) with a **Start** button. Pressing Start plays an animated progress bar and then reveals the live server + tmate SSH command. |
 | `!manage` | Live control panel: status, RAM usage bar, CPU usage bar, disk, OS, network I/O, uptime, server ID + buttons **Start / Stop / Restart / Get SSH / Refresh**. |
+| `!rules` | The 5 rules of the free tier. |
 | `!destroy` | Permanently removes the user's VPS. |
+| `!ban <@user\|id> [reason]` | **Staff.** Blocks the user, stops their server, DMs them the reason. |
+| `!unban <@user\|id>` | **Staff.** Restores access and DMs the user. |
+| `!bans` | **Staff.** List of all bans with reason and moderator. |
+| `!servers` | **Staff.** All deployed servers and their owners. |
 | `!ping` | Latency check. |
 | `!help` | Command list. |
 
@@ -46,9 +51,11 @@ cloudy-vps-bot/
 ├── vps_manager.py               # Docker backend + tmate SSH
 ├── views.py                     # buttons, deploy animation
 ├── embeds.py                    # all the pretty embeds
+├── moderation.py                # ban / unban storage (data/bans.json)
 ├── token_store.py               # bundled bot token (obfuscated, scanner-safe)
 ├── tools/set_token.py           # helper to replace the bundled token
 ├── tools/scan_secrets.py        # pre-push check: files + git history
+├── tools/check_tmate.sh         # diagnose tmate/SSH problems
 ├── tools/clean_git_history.sh   # wipes a leaked token from git history
 ├── .gitignore
 ├── requirements.txt
@@ -233,6 +240,72 @@ The resulting `ssh xxxxx@nyc1.tmate.io` line is sent to the user. No port
 forwarding or public IP is needed, but the host **must have outbound internet
 access** to `tmate.io`. Stopping or restarting a server invalidates its session —
 press **Get SSH** again to obtain a fresh one.
+
+---
+
+## Privacy: SSH only in DMs
+
+SSH credentials are **never posted in a channel or group**. Whenever a session is
+created (after `!deploy` or via the **Get SSH** button) the bot sends it to the
+user's **direct messages**. The public message only says *"Sent to your DMs"*.
+
+If the user has DMs closed, the bot falls back to an **ephemeral** reply that only
+that user can see, plus a hint to enable *Privacy Settings -> Direct Messages*.
+Set `SSH_TO_DM_ONLY=0` in `.env` to allow the ephemeral copy without the warning.
+
+---
+
+## Staff, rules and bans
+
+Owners are configured in `.env` (`OWNER_IDS`, comma-separated) and default to the
+bundled owner ID. Owners bypass the one-server limit, can ban/unban, and can
+never be banned themselves.
+
+```bash
+!ban 1264586393594630239 mining on the free tier
+!unban @user
+!bans
+!servers
+```
+
+Banning a user immediately:
+
+1. writes the ban to `data/bans.json` (survives restarts),
+2. **stops their running VPS**,
+3. DMs them the reason,
+4. blocks every command and every button they press.
+
+The 5 free-tier rules live in `config.py` (`RULES`) and are shown by `!rules`, by
+the **Rules** button in both panels, and referenced on the deploy card — pressing
+**Start** means accepting them.
+
+---
+
+## Troubleshooting: "Could not open a tmate session"
+
+Run the built-in diagnostic:
+
+```bash
+bash tools/check_tmate.sh
+```
+
+It checks, on the host **and** inside the guest container: DNS for
+`ssh.tmate.io`, outbound **TCP 2200**, whether the `tmate` binary exists, the
+tmate log, and finally opens a real test session.
+
+The three usual causes:
+
+| Cause | Fix |
+|---|---|
+| `tmate` missing from the guest image (old image built before this fix) | `docker build --no-cache -t cloudy-vps:ubuntu-22.04 ./images/ubuntu-22.04` then `!destroy` + `!deploy` |
+| Outbound **TCP 2200** blocked by the host firewall | `ufw allow out 2200/tcp` (or the equivalent in your provider's firewall) |
+| DNS not resolving inside containers | already handled via `VPS_DNS=1.1.1.1,8.8.8.8` in `.env` |
+
+What changed in the bot itself: tmate is now started with `nohup ... -F` and
+logged to `/tmp/cloudy.tmate.log`, the SSH string is **polled** instead of
+blocking on `tmate wait`, the binary is auto-installed if missing, existing
+sessions are validated before reuse, and failures return the real DNS/TCP/log
+output instead of *"no output"*.
 
 ---
 
