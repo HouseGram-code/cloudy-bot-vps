@@ -377,3 +377,29 @@ output instead of *"no output"*.
 - [ ] Slash commands (`/deploy`, `/manage`)
 - [ ] Admin commands: list all servers, force delete, quotas
 - [ ] More OS templates (Debian 12, Ubuntu 24.04)
+
+## Admin panel & maintenance mode
+
+| Command | Who | What it does |
+| --- | --- | --- |
+| `!admin` (`!panel`, `!админ`, `!панель`) | staff | Opens the admin panel: maintenance switch, live server / ban counters, preview of the public notice. |
+| `!maintenance on [reason]` (`!maint`, `!техработы`) | staff | Closes the bot: everyone except staff gets a nicely formatted "technical works" embed. The reason you type is shown to users. |
+| `!maintenance off` | staff | Opens the bot for everyone again. |
+
+While maintenance mode is ON:
+
+- `!deploy`, `!manage`, `!destroy` and all panel buttons are blocked for regular users; they receive the maintenance notice instead.
+- `!rules`, `!lang`, `!help`, `!ping` keep working, and already running VPS containers are **not** touched.
+- Staff (`OWNER_IDS`) can use everything as usual.
+
+The switch is stored in `MAINTENANCE_FILE` (`/app/data/maintenance.json` by default), so it survives bot restarts.
+
+## Pretty in-VPS banner (no rebuild needed)
+
+The login banner (`cloudy-banner`) is now installed into the container **at runtime** on every
+`!deploy` and on every Start / Restart from `!manage`. The bot copies `images/ubuntu-22.04/cloudy-banner.sh`
+into the guest as `/usr/local/bin/cloudy-banner`, wipes the old Ubuntu MOTD (`/etc/motd`,
+`/etc/update-motd.d/*`, `/etc/legal`) and hooks the banner into `/root/.bashrc`.
+
+So old containers and old images get the new banner too — just restart the VPS from `!manage`
+(or `!destroy` + `!deploy` for a clean box). Type `banner` inside the VPS to print it again.

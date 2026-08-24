@@ -24,8 +24,9 @@ from config import (
 from i18n import LANGUAGES, LangStore, lang_label, normalize
 from i18n import rules as rules_for
 from i18n import t
+from maintenance import MAINTENANCE
 from moderation import BanStore, ModerationError
-from views import DeployView, LanguageView, ManageView
+from views import AdminView, DeployView, LanguageView, ManageView
 from vps_manager import VPSError, VPSManager
 
 logging.basicConfig(
@@ -59,6 +60,14 @@ class Banned(commands.CheckFailure):
     pass
 
 
+class UnderMaintenance(commands.CheckFailure):
+    pass
+
+
+# Commands that keep working while maintenance mode is ON.
+MAINTENANCE_ALLOWED = {"rules", "lang", "help", "ping", "admin", "maintenance"}
+
+
 @bot.event
 async def on_ready() -> None:
     global manager
@@ -87,6 +96,16 @@ async def _block_banned(ctx: commands.Context) -> bool:
     if bans.is_banned(ctx.author.id):
         raise Banned()
     return True
+
+
+@bot.check
+async def _block_during_maintenance(ctx: commands.Context) -> bool:
+    """While maintenance mode is on, only staff can use the hosting commands."""
+    if not MAINTENANCE.enabled or is_owner(ctx.author.id):
+        return True
+    if ctx.command is not None and ctx.command.name in MAINTENANCE_ALLOWED:
+        return True
+    raise UnderMaintenance()
 
 
 async def _resolve_user_id(ctx: commands.Context, raw: str) -> tuple[int, str]:
@@ -402,6 +421,57 @@ async def servers_cmd(ctx: commands.Context) -> None:
     )
 
 
+@bot.command(name="admin", aliases=["panel", "\u0430\u0434\u043c\u0438\u043d", "\u043f\u0430\u043d\u0435\u043b\u044c"])
+@owner_only()
+async def admin_cmd(ctx: commands.Context) -> None:
+    """!admin - staff panel with the maintenance switch."""
+    lang = lang_of(ctx.author)
+    view = AdminView(ctx.author.id, MAINTENANCE, manager, bans, lang=lang)
+    msg = await ctx.reply(embed=view.panel_embed(), view=view, mention_author=False)
+    view.message = msg
+
+
+@bot.command(
+    name="maintenance",
+    aliases=["maint", "\u0442\u0435\u0445\u0440\u0430\u0431\u043e\u0442\u044b", "\u0442\u0435\u0445"],
+)
+@owner_only()
+async def maintenance_cmd(
+    ctx: commands.Context, mode: str = "", *, reason: str = ""
+) -> None:
+    """!maintenance on [reason] | off - close or open the bot for everyone."""
+    lang = lang_of(ctx.author)
+    choice = (mode or "").lower().strip()
+
+    on_words = {"on", "1", "true", "enable", "\u0432\u043a\u043b", "\u0432\u043a\u043b\u044e\u0447\u0438\u0442\u044c", "\u0434\u0430"}
+    off_words = {"off", "0", "false", "disable", "\u0432\u044b\u043a\u043b", "\u0432\u044b\u043a\u043b\u044e\u0447\u0438\u0442\u044c", "\u043d\u0435\u0442"}
+
+    if choice in on_words:
+        state = await MAINTENANCE.enable(
+            ctx.author.id, str(ctx.author), reason=reason.strip()
+        )
+    elif choice in off_words:
+        state = await MAINTENANCE.disable(ctx.author.id, str(ctx.author))
+    elif not choice:
+        # No argument: show the panel instead of guessing.
+        view = AdminView(ctx.author.id, MAINTENANCE, manager, bans, lang=lang)
+        msg = await ctx.reply(embed=view.panel_embed(), view=view, mention_author=False)
+        view.message = msg
+        return
+    else:
+        await ctx.reply(
+            embed=embeds.error_embed(
+                t(lang, "admin.usage", prefix=COMMAND_PREFIX), lang=lang
+            ),
+            mention_author=False,
+        )
+        return
+
+    await ctx.reply(
+        embed=embeds.maintenance_toggled_embed(state, lang), mention_author=False
+    )
+
+
 # ---------------------------------------------------------------------------
 # Error handling
 # ---------------------------------------------------------------------------
@@ -425,6 +495,13 @@ async def on_command_error(ctx: commands.Context, error: Exception) -> None:
                 ),
                 mention_author=False,
             )
+        return
+
+    if isinstance(error, UnderMaintenance):
+        await ctx.reply(
+            embed=embeds.maintenance_embed(MAINTENANCE.state(), lang),
+            mention_author=False,
+        )
         return
 
     if isinstance(error, commands.CheckFailure):

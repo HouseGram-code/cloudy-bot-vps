@@ -472,8 +472,134 @@ def help_embed(
             name=f"{EMOJI['shield']} {t(lang, 'help.staff')}",
             value=(
                 f"`{prefix}ban <@user|id> [reason]` • `{prefix}unban <@user|id>`\n"
-                f"`{prefix}bans` • `{prefix}servers`"
+                f"`{prefix}bans` • `{prefix}servers`\n"
+                f"`{prefix}admin` • `{prefix}maintenance on|off`"
             ),
+            inline=False,
+        )
+    return _footer(embed)
+
+
+# ---------------------------------------------------------------------------
+# Maintenance mode / admin panel
+# ---------------------------------------------------------------------------
+def maintenance_embed(state: dict, lang: str = DEFAULT_LANG) -> discord.Embed:
+    """The friendly \"we are working on the servers\" notice regular users see."""
+    reason = (state.get("reason") or "").strip() or t(lang, "maint.default_reason")
+    embed = discord.Embed(
+        title=f"\U0001F6A7 {t(lang, 'maint.title')}",
+        description=(
+            f"{EMOJI['gear']} **{t(lang, 'maint.headline')}**\n\n"
+            f"{t(lang, 'maint.body', prefix=P)}"
+        ),
+        color=COLOR_WARNING,
+    )
+    embed.add_field(
+        name=f"{EMOJI['spark']} {t(lang, 'maint.what')}",
+        value=f">>> {reason}",
+        inline=False,
+    )
+    since = state.get("since") or 0
+    if since:
+        embed.add_field(
+            name=f"{EMOJI['clock']} {t(lang, 'maint.since')}",
+            value=f"<t:{int(since)}:R>",
+            inline=True,
+        )
+    eta = (state.get("eta") or "").strip()
+    if eta:
+        embed.add_field(
+            name=f"\u23F3 {t(lang, 'maint.eta')}", value=eta, inline=True
+        )
+    embed.add_field(
+        name=f"{EMOJI['check']} {t(lang, 'maint.available')}",
+        value=t(lang, "maint.available_value", prefix=P),
+        inline=False,
+    )
+    embed.set_footer(text=f"{BOT_FOOTER} \u2022 {t(lang, 'maint.footer_note')}")
+    embed.timestamp = dt.datetime.now(dt.timezone.utc)
+    return embed
+
+
+def admin_panel_embed(
+    state: dict,
+    servers: int = 0,
+    ban_count: int = 0,
+    lang: str = DEFAULT_LANG,
+) -> discord.Embed:
+    """Staff-only control panel with the maintenance switch."""
+    on = bool(state.get("enabled"))
+    embed = discord.Embed(
+        title=f"{EMOJI['shield']} {t(lang, 'admin.title')}",
+        description=t(lang, "admin.desc", bot=BOT_NAME),
+        color=COLOR_WARNING if on else COLOR_SUCCESS,
+    )
+    embed.add_field(
+        name=f"\U0001F6A7 {t(lang, 'admin.mode')}",
+        value=(
+            f"{EMOJI['pending']} {t(lang, 'admin.mode_on')}"
+            if on
+            else f"{EMOJI['online']} {t(lang, 'admin.mode_off')}"
+        ),
+        inline=False,
+    )
+    if on:
+        reason = (state.get("reason") or "").strip() or t(lang, "maint.default_reason")
+        embed.add_field(
+            name=f"{EMOJI['scroll']} {t(lang, 'maint.what')}",
+            value=f">>> {reason}",
+            inline=False,
+        )
+    if state.get("since"):
+        embed.add_field(
+            name=f"{EMOJI['clock']} {t(lang, 'maint.since')}",
+            value=f"<t:{int(state['since'])}:R>",
+            inline=True,
+        )
+    if state.get("by_id"):
+        embed.add_field(
+            name=f"{EMOJI['hammer']} {t(lang, 'admin.changed_by')}",
+            value=f"<@{int(state['by_id'])}>",
+            inline=True,
+        )
+    embed.add_field(
+        name=f"{EMOJI['cloud']} {t(lang, 'admin.servers')}",
+        value=f"**{servers}**",
+        inline=True,
+    )
+    embed.add_field(
+        name=f"{EMOJI['lock']} {t(lang, 'admin.bans')}",
+        value=f"**{ban_count}**",
+        inline=True,
+    )
+    embed.add_field(
+        name=f"{EMOJI['gear']} {t(lang, 'admin.hint')}",
+        value=t(lang, "admin.hint_value", prefix=P),
+        inline=False,
+    )
+    return _footer(embed)
+
+
+def maintenance_toggled_embed(
+    state: dict, lang: str = DEFAULT_LANG
+) -> discord.Embed:
+    on = bool(state.get("enabled"))
+    embed = discord.Embed(
+        title=(
+            f"\U0001F6A7 {t(lang, 'admin.enabled_title')}"
+            if on
+            else f"{EMOJI['check']} {t(lang, 'admin.disabled_title')}"
+        ),
+        description=(
+            t(lang, "admin.enabled_desc") if on else t(lang, "admin.disabled_desc")
+        ),
+        color=COLOR_WARNING if on else COLOR_SUCCESS,
+    )
+    if on:
+        reason = (state.get("reason") or "").strip() or t(lang, "maint.default_reason")
+        embed.add_field(
+            name=f"{EMOJI['scroll']} {t(lang, 'maint.what')}",
+            value=f">>> {reason}",
             inline=False,
         )
     return _footer(embed)

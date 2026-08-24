@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import base64
 import json
 import logging
 import os
@@ -37,6 +38,9 @@ log = logging.getLogger("cloudy.vps")
 IMAGE_CONTEXT = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "images", "ubuntu-22.04"
 )
+
+BANNER_SCRIPT = os.path.join(IMAGE_CONTEXT, "cloudy-banner.sh")
+BANNER_PATH = "/usr/local/bin/cloudy-banner"
 
 TMATE_SOCK = "/tmp/cloudy.tmate.sock"
 TMATE_LOG = "/tmp/cloudy.tmate.log"
@@ -173,6 +177,13 @@ class VPSManager:
             kwargs.pop("storage_opt", None)
             container = self.client.containers.run(**kwargs)
 
+        # Old images shipped a broken /etc/motd - refresh the banner on every
+        # deployment so the guest always greets with the new one.
+        try:
+            self._install_banner(container, lang)
+        except Exception as exc:  # pragma: no cover
+            log.warning("could not install banner: %s", exc)
+
         record = {
             "container_id": container.id,
             "name": name,
@@ -194,6 +205,40 @@ class VPSManager:
         async with self._lock:
             return await asyncio.to_thread(self._create_sync, user_id, username, lang)
 
+    # ------------------------------------------------------------------
+    # Login banner (works on old containers too, no image rebuild needed)
+    # ------------------------------------------------------------------
+    def _install_banner(self, container, lang: str = "en") -> None:
+        """Push the pretty login banner into the guest and kill the old MOTD."""
+        try:
+            with open(BANNER_SCRIPT, "rb") as fh:
+                payload = base64.b64encode(fh.read()).decode("ascii")
+        except OSError as exc:
+            log.warning("banner script unavailable: %s", exc)
+            return
+
+        guest_lang = "ru" if str(lang).startswith("ru") else "en"
+        hook = (
+            "# cloudy-banner\n"
+            f"export CLOUDY_LANG=${{CLOUDY_LANG:-{guest_lang}}}\n"
+            "alias banner='/usr/local/bin/cloudy-banner'\n"
+            "case $- in *i*) /usr/local/bin/cloudy-banner ;; esac\n"
+        )
+        script = (
+            "set -e; mkdir -p /usr/local/bin; "
+            f"printf '%s' '{payload}' | base64 -d > {BANNER_PATH}; "
+            f"chmod +x {BANNER_PATH}; ln -sf {BANNER_PATH} /usr/local/bin/motd; "
+            # wipe every legacy welcome message so only the new banner shows
+            ": > /etc/motd; rm -f /etc/update-motd.d/* 2>/dev/null || true; "
+            ": > /etc/legal 2>/dev/null || true; "
+            "touch /root/.hushlogin; "
+            "sed -i '/cloudy-banner/d;/^alias banner=/d;/^export CLOUDY_LANG=/d' /root/.bashrc 2>/dev/null || true; "
+            f"printf '%s' {json.dumps(hook)} >> /root/.bashrc"
+        )
+        code, _out, err = self._exec(container, script)
+        if code != 0:
+            log.warning("banner install failed (%s): %s", code, err)
+
     def _action_sync(self, user_id: int, action: str) -> None:
         container = self._container(user_id)
         if container is None:
@@ -211,6 +256,12 @@ class VPSManager:
             container.restart(timeout=10)
         else:
             raise VPSError(f"Unknown action: {action}")
+
+        if action in ("start", "restart"):
+            try:
+                self._install_banner(container)
+            except Exception as exc:  # pragma: no cover
+                log.warning("could not refresh banner: %s", exc)
 
         # Any power action invalidates the previous tmate session.
         record = self.get_record(user_id)

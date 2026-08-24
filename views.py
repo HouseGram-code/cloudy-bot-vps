@@ -15,8 +15,16 @@ import logging
 import discord
 
 import embeds
-from config import ANIM_DELAY, COLOR_PRIMARY, COMMAND_PREFIX, EMOJI, SSH_TO_DM_ONLY
+from config import (
+    ANIM_DELAY,
+    COLOR_PRIMARY,
+    COMMAND_PREFIX,
+    EMOJI,
+    SSH_TO_DM_ONLY,
+    is_owner,
+)
 from i18n import DEFAULT_LANG, LANGUAGES, LangStore, t
+from maintenance import MAINTENANCE, MaintenanceStore
 from moderation import BanStore
 from vps_manager import VPSError, VPSManager
 
@@ -99,6 +107,13 @@ class OwnerOnlyView(discord.ui.View):
             record = self.bans.get(interaction.user.id) or {}
             await interaction.response.send_message(
                 embed=embeds.banned_notice_embed(record, self.lang), ephemeral=True
+            )
+            return False
+        # Maintenance mode: buttons are frozen for everyone except staff.
+        if MAINTENANCE.enabled and not is_owner(interaction.user.id):
+            await interaction.response.send_message(
+                embed=embeds.maintenance_embed(MAINTENANCE.state(), self.lang),
+                ephemeral=True,
             )
             return False
         return True
@@ -472,3 +487,122 @@ class LanguageView(discord.ui.View):
                 await self.message.edit(view=self)
             except discord.HTTPException:
                 pass
+
+
+# ---------------------------------------------------------------------------
+# !admin - staff panel with the maintenance switch
+# ---------------------------------------------------------------------------
+class AdminView(discord.ui.View):
+    """Owner-only panel: turn maintenance mode on/off and see live counters."""
+
+    def __init__(
+        self,
+        owner_id: int,
+        maintenance: MaintenanceStore = MAINTENANCE,
+        manager: VPSManager | None = None,
+        bans: BanStore | None = None,
+        lang: str = DEFAULT_LANG,
+    ):
+        super().__init__(timeout=600)
+        self.owner_id = owner_id
+        self.maintenance = maintenance
+        self.manager = manager
+        self.bans = bans
+        self.lang = lang
+        self.message: discord.Message | None = None
+        self.sync_buttons()
+
+    # ---- helpers ----
+    def _counts(self) -> tuple[int, int]:
+        servers = 0
+        if self.manager is not None:
+            try:
+                servers = len(self.manager.all_records())
+            except Exception:  # pragma: no cover
+                servers = 0
+        ban_count = self.bans.count if self.bans is not None else 0
+        return servers, ban_count
+
+    def panel_embed(self) -> discord.Embed:
+        servers, ban_count = self._counts()
+        return embeds.admin_panel_embed(
+            self.maintenance.state(), servers, ban_count, self.lang
+        )
+
+    def sync_buttons(self) -> None:
+        on = self.maintenance.enabled
+        for child in self.children:
+            if not isinstance(child, discord.ui.Button):
+                continue
+            if child.custom_id == "maint_toggle":
+                child.label = t(self.lang, "admin.btn_off" if on else "admin.btn_on")
+                child.style = (
+                    discord.ButtonStyle.success if on else discord.ButtonStyle.danger
+                )
+                child.emoji = "\u2705" if on else "\U0001F6A7"
+            elif child.custom_id == "maint_preview":
+                child.label = t(self.lang, "admin.btn_preview")
+            elif child.custom_id == "maint_refresh":
+                child.label = t(self.lang, "admin.btn_refresh")
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id or not is_owner(interaction.user.id):
+            await interaction.response.send_message(
+                embed=embeds.error_embed(
+                    t(self.lang, "admin.only_staff"),
+                    title=t(self.lang, "panel.not_yours_title"),
+                    lang=self.lang,
+                ),
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    async def on_timeout(self) -> None:
+        for child in self.children:
+            child.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+    # ---- buttons ----
+    @discord.ui.button(
+        label="Maintenance",
+        style=discord.ButtonStyle.danger,
+        emoji="\U0001F6A7",
+        custom_id="maint_toggle",
+    )
+    async def toggle(self, interaction: discord.Interaction, button: discord.ui.Button):
+        state = await self.maintenance.toggle(
+            interaction.user.id, str(interaction.user)
+        )
+        self.sync_buttons()
+        await interaction.response.edit_message(embed=self.panel_embed(), view=self)
+        await interaction.followup.send(
+            embed=embeds.maintenance_toggled_embed(state, self.lang), ephemeral=True
+        )
+
+    @discord.ui.button(
+        label="Preview",
+        style=discord.ButtonStyle.primary,
+        emoji="\U0001F441\ufe0f",
+        custom_id="maint_preview",
+    )
+    async def preview(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Show exactly what regular users see while maintenance is on."""
+        await interaction.response.send_message(
+            embed=embeds.maintenance_embed(self.maintenance.state(), self.lang),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(
+        label="Refresh",
+        style=discord.ButtonStyle.secondary,
+        emoji="\U0001F501",
+        custom_id="maint_refresh",
+    )
+    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.sync_buttons()
+        await interaction.response.edit_message(embed=self.panel_embed(), view=self)
