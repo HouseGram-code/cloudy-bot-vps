@@ -24,9 +24,9 @@ _KEY = b'cloudy-vps-bot/1.0-beta'
 
 _BLOB_PARTS = (
     "Ljg6RSktYEI+CXhXITB2AmN0",
-    "bBorMDQaIi5bIw5BGB4JAxsu",
-    "MVxmeGh9UjMOBlMrKBc9A3Qh",
-    "AD1HCjomWXltWWVQNBULMSdb",
+    "bBorMDQaIi5bI0EAFBIjA1Vf",
+    "Rl1UWElmK10/M1VfHgUrF0AS",
+    "QwkAB1cGWVgbdVskBDUZG1ki",
 )
 
 

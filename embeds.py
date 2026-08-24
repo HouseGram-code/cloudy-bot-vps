@@ -82,6 +82,43 @@ def rules_embed(lang: str = DEFAULT_LANG) -> discord.Embed:
 # ---------------------------------------------------------------------------
 # !deploy
 # ---------------------------------------------------------------------------
+def about_embed(lang: str = DEFAULT_LANG, stats: dict | None = None) -> discord.Embed:
+    """Pretty \"what is this bot\" card used by !about."""
+    embed = discord.Embed(
+        title=f"{EMOJI['cloud']} {BOT_NAME} \u2014 {t(lang, 'about.title')}",
+        description=t(lang, "about.desc"),
+        color=COLOR_PRIMARY,
+    )
+    embed.add_field(
+        name=f"{EMOJI['spark']} {t(lang, 'about.specs')}",
+        value=(
+            f"{EMOJI['ram']} **{PLAN['ram_mb']} MB** RAM \u2022 "
+            f"{EMOJI['cpu']} **{PLAN['cpu_cores']:g} vCPU** \u2022 "
+            f"{EMOJI['disk']} **{PLAN['disk_gb']} GB** SSD\n"
+            f"{EMOJI['os']} `{PLAN['os']}` \u2022 {EMOJI['key']} `root / SSH`\n"
+            f"{EMOJI['net']} `{PLAN['bandwidth']}` \u2022 `{PLAN['name']}`"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name=f"{EMOJI['rocket']} {t(lang, 'about.start')}",
+        value=t(lang, "about.start_value", prefix=P),
+        inline=False,
+    )
+    if stats:
+        embed.add_field(
+            name=f"{EMOJI['gear']} {t(lang, 'admin.capacity')}",
+            value=capacity_line(stats, lang),
+            inline=False,
+        )
+    embed.add_field(
+        name=f"{EMOJI['scroll']} {t(lang, 'about.links')}",
+        value=t(lang, "about.links_value", prefix=P),
+        inline=False,
+    )
+    return _footer(embed)
+
+
 def capacity_line(stats: dict, lang: str = DEFAULT_LANG) -> str:
     """One-line summary: `3/5 slots - 2 running - 1 stopped`."""
     return t(
@@ -486,6 +523,11 @@ def help_embed(
     embed.add_field(
         name=f"`{prefix}slots` \u2022 `{prefix}\u0441\u043b\u043e\u0442\u044b`",
         value=t(lang, "help.slots"),
+        inline=False,
+    )
+    embed.add_field(
+        name=f"`{prefix}about` \u2022 `{prefix}\u043e\u0431\u043e\u0442\u0435`",
+        value=t(lang, "help.about"),
         inline=False,
     )
     embed.add_field(name=f"`{prefix}ping`", value=t(lang, "help.ping"), inline=False)

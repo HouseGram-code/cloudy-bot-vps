@@ -391,6 +391,49 @@ STRINGS: dict[str, dict[str, str]] = {
             "\u041a\u043e\u0433\u0434\u0430 \u043f\u043e\u044f\u0432\u0438\u0442\u0441\u044f \u0441\u0432\u043e\u0431\u043e\u0434\u043d\u044b\u0439 \u0441\u043b\u043e\u0442, \u043c\u043e\u0436\u043d\u043e \u0441\u043e\u0437\u0434\u0430\u0442\u044c \u043d\u043e\u0432\u044b\u0439 \u0447\u0435\u0440\u0435\u0437 `{prefix}deploy`."
         ),
     },
+    "about.title": {
+        "en": "Free VPS hosting, right from Discord",
+        "ru": "\u0411\u0435\u0441\u043f\u043b\u0430\u0442\u043d\u044b\u0439 VPS \u043f\u0440\u044f\u043c\u043e \u0438\u0437 Discord",
+    },
+    "about.desc": {
+        "en": (
+            "**Cloudy VPS Bot** hands out free Ubuntu 22.04 servers in seconds.\n"
+            "One command, one slot, full root access over SSH \u2014 no card, no cost."
+        ),
+        "ru": (
+            "**Cloudy VPS Bot** \u0432\u044b\u0434\u0430\u0451\u0442 \u0431\u0435\u0441\u043f\u043b\u0430\u0442\u043d\u044b\u0435 \u0441\u0435\u0440\u0432\u0435\u0440\u044b Ubuntu 22.04 \u0437\u0430 \u043d\u0435\u0441\u043a\u043e\u043b\u044c\u043a\u043e \u0441\u0435\u043a\u0443\u043d\u0434.\n"
+            "\u041e\u0434\u043d\u0430 \u043a\u043e\u043c\u0430\u043d\u0434\u0430, \u043e\u0434\u0438\u043d \u0441\u043b\u043e\u0442, \u043f\u043e\u043b\u043d\u044b\u0439 root \u043f\u043e SSH \u2014 \u0431\u0435\u0437 \u043a\u0430\u0440\u0442\u044b \u0438 \u043f\u043b\u0430\u0442\u044b."
+        ),
+    },
+    "about.specs": {"en": "What you get", "ru": "\u0427\u0442\u043e \u0432\u044b \u043f\u043e\u043b\u0443\u0447\u0430\u0435\u0442\u0435"},
+    "about.start": {"en": "How to start", "ru": "\u041a\u0430\u043a \u043d\u0430\u0447\u0430\u0442\u044c"},
+    "about.start_value": {
+        "en": (
+            "**1.** `{prefix}deploy` \u2014 pick the free plan and press Start\n"
+            "**2.** the SSH line arrives in your DM\n"
+            "**3.** `{prefix}manage` \u2014 restart, get SSH again or check status"
+        ),
+        "ru": (
+            "**1.** `{prefix}deploy` \u2014 \u0432\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0431\u0435\u0441\u043f\u043b\u0430\u0442\u043d\u044b\u0439 \u043f\u043b\u0430\u043d \u0438 \u043d\u0430\u0436\u043c\u0438\u0442\u0435 \u0421\u0442\u0430\u0440\u0442\n"
+            "**2.** SSH-\u0441\u0442\u0440\u043e\u043a\u0430 \u043f\u0440\u0438\u0434\u0451\u0442 \u0432\u0430\u043c \u0432 \u041b\u0421\n"
+            "**3.** `{prefix}manage` \u2014 \u0440\u0435\u0441\u0442\u0430\u0440\u0442, \u043d\u043e\u0432\u044b\u0439 SSH \u0438\u043b\u0438 \u0441\u0442\u0430\u0442\u0443\u0441"
+        ),
+    },
+    "about.links": {"en": "Useful commands", "ru": "\u041f\u043e\u043b\u0435\u0437\u043d\u044b\u0435 \u043a\u043e\u043c\u0430\u043d\u0434\u044b"},
+    "about.links_value": {
+        "en": (
+            "`{prefix}slots` \u2022 `{prefix}rules` \u2022 `{prefix}help` \u2022 "
+            "`{prefix}lang ru|en` \u2022 `{prefix}destroy`"
+        ),
+        "ru": (
+            "`{prefix}slots` \u2022 `{prefix}rules` \u2022 `{prefix}help` \u2022 "
+            "`{prefix}lang ru|en` \u2022 `{prefix}destroy`"
+        ),
+    },
+    "help.about": {
+        "en": "What this bot is and how the free VPS works.",
+        "ru": "\u0427\u0442\u043e \u0443\u043c\u0435\u0435\u0442 \u0431\u043e\u0442 \u0438 \u043a\u0430\u043a \u0440\u0430\u0431\u043e\u0442\u0430\u0435\u0442 \u0431\u0435\u0441\u043f\u043b\u0430\u0442\u043d\u044b\u0439 VPS.",
+    },
     "slots.presence": {
         "en": "{used}/{total} slots \u2022 {running} online",
         "ru": "{used}/{total} \u0441\u043b\u043e\u0442\u043e\u0432 \u2022 {running} \u043e\u043d\u043b\u0430\u0439\u043d",

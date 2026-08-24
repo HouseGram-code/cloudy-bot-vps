@@ -21,7 +21,7 @@ from config import (
     OWNER_IDS,
     is_owner,
 )
-from i18n import DEFAULT_LANG, LANGUAGES, LangStore, lang_label, normalize
+from i18n import LANGUAGES, LangStore, lang_label, normalize
 from i18n import rules as rules_for
 from i18n import t
 from maintenance import MAINTENANCE
@@ -43,7 +43,7 @@ bot = commands.Bot(
     command_prefix=COMMAND_PREFIX,
     intents=intents,
     help_command=None,
-    activity=discord.Game(name=f"{COMMAND_PREFIX}deploy \u2022 free VPS"),
+    activity=discord.Game(name=f"\u2601 Free VPS \u2022 {COMMAND_PREFIX}deploy"),
 )
 
 manager: VPSManager | None = None
@@ -67,6 +67,7 @@ class UnderMaintenance(commands.CheckFailure):
 
 # Commands that keep working while maintenance mode is ON.
 MAINTENANCE_ALLOWED = {
+    "about",
     "rules",
     "lang",
     "help",
@@ -105,28 +106,57 @@ async def _stats() -> dict:
         return {}
 
 
-async def update_presence() -> None:
-    """Show the slot counters right in the bot's Discord status."""
+# Rotating English status lines. Each entry is (ActivityType, template) and may
+# use {used} {total} {free} {running} {stopped} {prefix}.
+PRESENCE_LINES: list[tuple[discord.ActivityType, str]] = [
+    (discord.ActivityType.playing, "\u2601 Free VPS \u2022 {prefix}deploy"),
+    (discord.ActivityType.watching, "{used}/{total} slots \u2022 {running} online"),
+    (discord.ActivityType.playing, "\u26a1 Free Ubuntu 22.04 VPS \u2022 {free} slots left"),
+    (discord.ActivityType.watching, "\u25b8 {running} running \u2022 {stopped} stopped"),
+    (discord.ActivityType.playing, "\u2601 Cloudy \u2022 free VPS for everyone"),
+]
+
+# Shown while Docker is still starting up or unavailable.
+PRESENCE_FALLBACK = (
+    discord.ActivityType.playing,
+    "\u2601 Free VPS \u2022 {prefix}deploy",
+)
+
+_presence_index = 0
+
+
+async def update_presence(rotate: bool = False) -> None:
+    """Pretty English status line with the live slot counters."""
+    global _presence_index
     stats = await _stats()
     if stats:
-        text = t(
-            DEFAULT_LANG,
-            "slots.presence",
+        if rotate:
+            _presence_index = (_presence_index + 1) % len(PRESENCE_LINES)
+        kind, template = PRESENCE_LINES[_presence_index % len(PRESENCE_LINES)]
+        text = template.format(
             used=int(stats.get("used", 0)),
             total=int(stats.get("slots", 0)),
+            free=int(stats.get("free", 0)),
             running=int(stats.get("running", 0)),
+            stopped=int(stats.get("stopped", 0)),
+            prefix=COMMAND_PREFIX,
         )
     else:
-        text = f"{COMMAND_PREFIX}deploy \u2022 free VPS"
+        kind, template = PRESENCE_FALLBACK
+        text = template.format(prefix=COMMAND_PREFIX)
+
     try:
-        await bot.change_presence(activity=discord.Game(name=text))
+        await bot.change_presence(
+            status=discord.Status.online,
+            activity=discord.Activity(type=kind, name=text[:128]),
+        )
     except discord.HTTPException:
         pass
 
 
-@tasks.loop(seconds=60)
+@tasks.loop(seconds=30)
 async def presence_loop() -> None:
-    await update_presence()
+    await update_presence(rotate=True)
 
 
 @presence_loop.before_loop
@@ -254,6 +284,24 @@ async def help_cmd(ctx: commands.Context) -> None:
         embed=embeds.help_embed(
             COMMAND_PREFIX, owner=is_owner(ctx.author.id), lang=lang_of(ctx.author)
         ),
+        mention_author=False,
+    )
+
+
+@bot.command(
+    name="about",
+    aliases=[
+        "info",
+        "bot",
+        "\u043e\u0431\u043e\u0442\u0435",
+        "\u043e\u043f\u0438\u0441\u0430\u043d\u0438\u0435",
+    ],
+)
+async def about_cmd(ctx: commands.Context) -> None:
+    """!about - show what the bot is and what the free VPS includes."""
+    stats = await _stats()
+    await ctx.reply(
+        embed=embeds.about_embed(lang_of(ctx.author), stats=stats or None),
         mention_author=False,
     )
 

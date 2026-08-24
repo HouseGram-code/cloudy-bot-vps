@@ -404,6 +404,23 @@ into the guest as `/usr/local/bin/cloudy-banner`, wipes the old Ubuntu MOTD (`/e
 So old containers and old images get the new banner too — just restart the VPS from `!manage`
 (or `!destroy` + `!deploy` for a clean box). Type `banner` inside the VPS to print it again.
 
+## Bot profile description ("About Me")
+
+Discord does **not** let a bot edit its own profile description over the API.
+The text under the bot's name comes from the Developer Portal:
+
+1. https://discord.com/developers/applications -> your app -> **General Information**
+2. Paste this into **Description** and press Save:
+
+```
+Free Ubuntu 22.04 VPS, right from Discord. One command, full root over SSH, no card, no cost. Type !deploy to get your free VPS, or !about to see the specs.
+```
+
+3. Reload Discord (Ctrl+R) - the profile card is cached for a while.
+
+Inside Discord the same description is always available as a pretty card via
+`!about` (aliases `!info`, `!bot`, `!оботе`, `!описание`), in EN and RU.
+
 ## Slots (global capacity)
 
 The host has a fixed number of slots, shown everywhere as `used/total`
