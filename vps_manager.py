@@ -41,6 +41,34 @@ IMAGE_CONTEXT = os.path.join(
 
 BANNER_SCRIPT = os.path.join(IMAGE_CONTEXT, "cloudy-banner.sh")
 BANNER_PATH = "/usr/local/bin/cloudy-banner"
+LOGIN_PATH = "/usr/local/bin/cloudy-login"
+PROFILE_HOOK = "/etc/profile.d/00-cloudy-banner.sh"
+
+# Shell snippet sourced by every interactive shell in the guest.
+BANNER_HOOK = """# cloudy-banner (managed by Cloudy VPS Bot)
+export CLOUDY_LANG="${CLOUDY_LANG:-%(lang)s}"
+alias banner='/usr/local/bin/cloudy-banner'
+case $- in
+  *i*)
+    if [ -z "$CLOUDY_BANNER_SHOWN" ] && [ -x /usr/local/bin/cloudy-banner ]; then
+      export CLOUDY_BANNER_SHOWN=1
+      /usr/local/bin/cloudy-banner
+    fi
+    ;;
+esac
+"""
+
+# Entry point used by the tmate session, so the banner shows even if the
+# guest image has a stripped down /root/.profile.
+LOGIN_WRAPPER = """#!/bin/bash
+export TERM="${TERM:-xterm-256color}"
+export CLOUDY_LANG="${CLOUDY_LANG:-%(lang)s}"
+if [ -x /usr/local/bin/cloudy-banner ]; then
+  /usr/local/bin/cloudy-banner
+fi
+export CLOUDY_BANNER_SHOWN=1
+exec bash -l
+"""
 
 TMATE_SOCK = "/tmp/cloudy.tmate.sock"
 TMATE_LOG = "/tmp/cloudy.tmate.log"
@@ -126,13 +154,43 @@ class VPSManager:
     # ------------------------------------------------------------------
     # Create / control
     # ------------------------------------------------------------------
+    def _owned_containers(self, user_id: int) -> list:
+        """Every container (running or stopped) that belongs to this user."""
+        try:
+            return self.client.containers.list(
+                all=True, filters={"label": f"cloudy.owner={user_id}"}
+            )
+        except APIError as exc:  # pragma: no cover
+            log.warning("could not list containers for %s: %s", user_id, exc)
+            record_container = self._container(user_id)
+            return [record_container] if record_container else []
+
+    def _records_for(self, user_id: int) -> list[tuple[str, dict]]:
+        return [
+            (key, rec)
+            for key, rec in self._state["servers"].items()
+            if int(rec.get("owner_id", -1)) == int(user_id)
+        ]
+
+    def quota(self, user_id: int) -> tuple[int, int | None]:
+        """Return (used, limit). `limit` is None for staff = unlimited."""
+        used = len(self._owned_containers(user_id))
+        if is_owner(user_id) or not MAX_VPS_PER_USER:
+            return used, None
+        return used, int(MAX_VPS_PER_USER)
+
     def _create_sync(self, user_id: int, username: str, lang: str = "en") -> dict:
-        if (
-            MAX_VPS_PER_USER
-            and not is_owner(user_id)
-            and self._container(user_id) is not None
-        ):
-            raise VPSError("You already own a VPS. Use `!manage` to control it.")
+        # Hard quota: regular users get MAX_VPS_PER_USER (1), staff unlimited.
+        # Counting real containers instead of state entries keeps the limit
+        # working even if the state file was lost or edited by hand.
+        if MAX_VPS_PER_USER and not is_owner(user_id):
+            used = len(self._owned_containers(user_id))
+            if used >= int(MAX_VPS_PER_USER):
+                raise VPSError(
+                    f"**VPS limit reached.** Your account can run "
+                    f"`{int(MAX_VPS_PER_USER)}` VPS and you already have `{used}`.\n"
+                    "Use `!manage` to control it, or `!destroy` to delete it first."
+                )
 
         self._ensure_image_sync()
 
@@ -197,6 +255,13 @@ class VPSManager:
             "created_ts": time.time(),
             "ssh": None,
         }
+        # Staff may own several servers: keep the newest one as the primary
+        # record (the one !manage / !destroy work on) and park the previous
+        # ones under a suffixed key so they stay visible in !servers.
+        primary = self._state["servers"].get(str(user_id))
+        if primary and primary.get("container_id") != container.id:
+            parked = f"{user_id}:{primary['container_id'][:12]}"
+            self._state["servers"][parked] = primary
         self._state["servers"][str(user_id)] = record
         self._save_state()
         return record
@@ -208,8 +273,29 @@ class VPSManager:
     # ------------------------------------------------------------------
     # Login banner (works on old containers too, no image rebuild needed)
     # ------------------------------------------------------------------
-    def _install_banner(self, container, lang: str = "en") -> None:
-        """Push the pretty login banner into the guest and kill the old MOTD."""
+    @staticmethod
+    def _guest_lang(container, fallback: str = "en") -> str:
+        """Read CLOUDY_LANG from the container environment."""
+        try:
+            env = container.attrs.get("Config", {}).get("Env") or []
+            for item in env:
+                if item.startswith("CLOUDY_LANG="):
+                    value = item.split("=", 1)[1]
+                    return "ru" if value.startswith("ru") else "en"
+        except Exception:  # pragma: no cover
+            pass
+        return "ru" if str(fallback).startswith("ru") else "en"
+
+    def _install_banner(self, container, lang: str | None = None) -> None:
+        """Push the pretty login banner into the guest and kill the old MOTD.
+
+        Everything is shipped base64-encoded, because `printf '%s' "a\\nb"`
+        does NOT expand `\\n` in bash - the previous version wrote a single
+        broken line into /root/.bashrc, which is why no banner appeared.
+        Hooks are installed in /etc/profile.d, /root/.bashrc and
+        /root/.bash_profile, and the tmate session runs `cloudy-login`, so the
+        banner shows no matter how the guest image is set up.
+        """
         try:
             with open(BANNER_SCRIPT, "rb") as fh:
                 payload = base64.b64encode(fh.read()).decode("ascii")
@@ -217,27 +303,44 @@ class VPSManager:
             log.warning("banner script unavailable: %s", exc)
             return
 
-        guest_lang = "ru" if str(lang).startswith("ru") else "en"
-        hook = (
-            "# cloudy-banner\n"
-            f"export CLOUDY_LANG=${{CLOUDY_LANG:-{guest_lang}}}\n"
-            "alias banner='/usr/local/bin/cloudy-banner'\n"
-            "case $- in *i*) /usr/local/bin/cloudy-banner ;; esac\n"
+        guest_lang = (
+            self._guest_lang(container)
+            if lang is None
+            else ("ru" if str(lang).startswith("ru") else "en")
         )
+
+        def b64(text: str) -> str:
+            return base64.b64encode(text.encode("utf-8")).decode("ascii")
+
+        hook_b64 = b64(BANNER_HOOK % {"lang": guest_lang})
+        login_b64 = b64(LOGIN_WRAPPER % {"lang": guest_lang})
+        clean = "/cloudy-banner/d;/cloudy-login/d;/^alias banner=/d;/^export CLOUDY_LANG=/d"
+
         script = (
-            "set -e; mkdir -p /usr/local/bin; "
+            "set -e; mkdir -p /usr/local/bin /etc/profile.d; "
             f"printf '%s' '{payload}' | base64 -d > {BANNER_PATH}; "
-            f"chmod +x {BANNER_PATH}; ln -sf {BANNER_PATH} /usr/local/bin/motd; "
+            f"chmod 755 {BANNER_PATH}; ln -sf {BANNER_PATH} /usr/local/bin/motd; "
+            f"printf '%s' '{login_b64}' | base64 -d > {LOGIN_PATH}; "
+            f"chmod 755 {LOGIN_PATH}; "
+            f"printf '%s' '{hook_b64}' | base64 -d > {PROFILE_HOOK}; "
+            f"chmod 644 {PROFILE_HOOK}; "
             # wipe every legacy welcome message so only the new banner shows
             ": > /etc/motd; rm -f /etc/update-motd.d/* 2>/dev/null || true; "
             ": > /etc/legal 2>/dev/null || true; "
-            "touch /root/.hushlogin; "
-            "sed -i '/cloudy-banner/d;/^alias banner=/d;/^export CLOUDY_LANG=/d' /root/.bashrc 2>/dev/null || true; "
-            f"printf '%s' {json.dumps(hook)} >> /root/.bashrc"
+            "touch /root/.hushlogin /root/.bashrc /root/.bash_profile; "
+            f"sed -i '{clean}' /root/.bashrc /root/.bash_profile 2>/dev/null || true; "
+            f"printf '%s' '{hook_b64}' | base64 -d >> /root/.bashrc; "
+            "printf '%s\\n' '[ -f /root/.bashrc ] && . /root/.bashrc # cloudy-banner' "
+            ">> /root/.bash_profile; "
+            # sanity check: the banner must actually run inside the guest
+            f"CLOUDY_LANG={guest_lang} {BANNER_PATH} >/dev/null 2>&1 || "
+            "echo 'banner-selftest-failed' >&2; exit 0"
         )
         code, _out, err = self._exec(container, script)
-        if code != 0:
-            log.warning("banner install failed (%s): %s", code, err)
+        if code != 0 or "banner-selftest-failed" in (err or ""):
+            log.warning("banner install issue (%s): %s", code, err or "selftest failed")
+        else:
+            log.info("banner installed in %s (%s)", container.short_id, guest_lang)
 
     def _action_sync(self, user_id: int, action: str) -> None:
         container = self._container(user_id)
@@ -278,6 +381,24 @@ class VPSManager:
         if container is not None:
             container.remove(force=True)
         self._state["servers"].pop(str(user_id), None)
+
+        # Staff can own extra servers - promote the newest leftover so that
+        # !manage keeps working after a delete.
+        leftovers = sorted(
+            (item for item in self._records_for(user_id) if item[0] != str(user_id)),
+            key=lambda item: item[1].get("created_ts", 0),
+            reverse=True,
+        )
+        for key, rec in leftovers:
+            try:
+                self.client.containers.get(rec["container_id"])
+            except NotFound:
+                self._state["servers"].pop(key, None)
+                continue
+            self._state["servers"].pop(key, None)
+            self._state["servers"][str(user_id)] = rec
+            break
+
         self._save_state()
 
     async def delete_vps(self, user_id: int) -> None:
@@ -509,7 +630,9 @@ class VPSManager:
             "mkdir -p /root/.ssh && chmod 700 /root/.ssh; "
             "export TERM=xterm-256color; "
             f"setsid nohup tmate -f {TMATE_CONF} -S {TMATE_SOCK} -F new-session -d "
-            f"'TERM=xterm-256color bash -l' </dev/null > {port_log} 2>&1 & "
+            "'TERM=xterm-256color /bin/bash -lc \"test -x /usr/local/bin/cloudy-login "
+            "&& exec /usr/local/bin/cloudy-login || exec bash -l\"' "
+            f"</dev/null > {port_log} 2>&1 & "
             f"sleep 2; ln -sf {port_log} {TMATE_LOG}; echo started; exit 0"
         )
         self._exec(container, start)
@@ -563,6 +686,13 @@ class VPSManager:
                 return out
 
         self._ensure_tmate_binary(container)
+
+        # Refresh the banner right before the shell is created, so even VPS
+        # containers made by older bot versions greet the user properly.
+        try:
+            self._install_banner(container)
+        except Exception as exc:  # pragma: no cover
+            log.warning("could not refresh banner before session: %s", exc)
 
         # The default relay port (2200) is blocked on a lot of hosts, so try
         # every configured port and keep the first one that produces a session.

@@ -403,3 +403,42 @@ into the guest as `/usr/local/bin/cloudy-banner`, wipes the old Ubuntu MOTD (`/e
 
 So old containers and old images get the new banner too — just restart the VPS from `!manage`
 (or `!destroy` + `!deploy` for a clean box). Type `banner` inside the VPS to print it again.
+
+## VPS quota
+
+| Role | Limit |
+| --- | --- |
+| Regular user | `MAX_VPS_PER_USER` (default **1**) |
+| Staff (`OWNER_IDS`) | unlimited |
+
+The limit is enforced by counting real Docker containers labelled
+`cloudy.owner=<discord id>`, so it keeps working even if `data/vps_state.json`
+is deleted or edited by hand. A user who is at the limit gets a clear
+"VPS limit reached" message with a hint to use `!manage` or `!destroy`.
+
+Staff can deploy as many servers as they want: the newest one becomes the
+primary server that `!manage` / `!destroy` control, older ones keep running and
+stay listed in `!servers`. After `!destroy` the next newest staff server is
+promoted automatically.
+
+## Banner troubleshooting (fixed in this build)
+
+The banner used to be installed with `printf '%s' "line1\nline2" >> /root/.bashrc`.
+Bash does **not** expand `\n` with `%s`, so `.bashrc` received one broken line and
+the banner was never executed. On top of that, tmate starts `bash -l`, which does
+not necessarily source `.bashrc` at all.
+
+Now the bot:
+
+1. ships the banner and both hooks **base64-encoded** (no escaping issues at all);
+2. installs `/usr/local/bin/cloudy-banner`, `/usr/local/bin/cloudy-login`,
+   `/etc/profile.d/00-cloudy-banner.sh`, plus hooks in `/root/.bashrc` and
+   `/root/.bash_profile` (guarded by `CLOUDY_BANNER_SHOWN`, so it never prints twice);
+3. starts the tmate session through `cloudy-login`, which prints the banner and then
+   `exec bash -l` — so it shows even on a container with a stripped-down profile;
+4. re-installs the banner on **deploy, start, restart and every SSH request**, and
+   runs a self-test inside the guest (`banner install issue …` appears in the bot log
+   if something is wrong).
+
+To see it: `!manage` → **Get SSH** (a fresh key re-installs the banner), or type
+`banner` inside the VPS.

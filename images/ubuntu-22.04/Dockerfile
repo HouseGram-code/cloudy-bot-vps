@@ -64,17 +64,46 @@ RUN set -eux; \
 # The banner is a real script (no fragile printf escaping) and is bilingual:
 # CLOUDY_LANG=ru switches every label to Russian.
 COPY cloudy-banner.sh /usr/local/bin/cloudy-banner
-RUN chmod +x /usr/local/bin/cloudy-banner \
-    && ln -sf /usr/local/bin/cloudy-banner /usr/local/bin/motd \
-    && : > /etc/motd \
-    && printf '%s\n' \
-        '' \
-        '# Cloudy VPS' \
-        'cd /root' \
-        'alias banner=/usr/local/bin/cloudy-banner' \
-        'case $- in *i*) /usr/local/bin/cloudy-banner ;; esac' \
-        >> /root/.bashrc \
-    && /usr/local/bin/cloudy-banner > /dev/null
+RUN set -eux; \
+    chmod 755 /usr/local/bin/cloudy-banner; \
+    ln -sf /usr/local/bin/cloudy-banner /usr/local/bin/motd; \
+    : > /etc/motd; \
+    rm -f /etc/update-motd.d/* 2>/dev/null || true; \
+    : > /etc/legal 2>/dev/null || true; \
+    touch /root/.hushlogin; \
+    mkdir -p /etc/profile.d; \
+    # cloudy-login is what the tmate session executes, so the banner is shown
+    # even if ~/.bashrc is never sourced by the login shell.
+    printf '%s\n' \
+        '#!/bin/bash' \
+        'export TERM="${TERM:-xterm-256color}"' \
+        'export CLOUDY_LANG="${CLOUDY_LANG:-en}"' \
+        '[ -x /usr/local/bin/cloudy-banner ] && /usr/local/bin/cloudy-banner' \
+        'export CLOUDY_BANNER_SHOWN=1' \
+        'exec bash -l' \
+        > /usr/local/bin/cloudy-login; \
+    chmod 755 /usr/local/bin/cloudy-login; \
+    # one shared hook for login shells (/etc/profile.d) and interactive ones
+    printf '%s\n' \
+        '# cloudy-banner' \
+        'export CLOUDY_LANG="${CLOUDY_LANG:-en}"' \
+        "alias banner='/usr/local/bin/cloudy-banner'" \
+        'case $- in' \
+        '  *i*)' \
+        '    if [ -z "$CLOUDY_BANNER_SHOWN" ] && [ -x /usr/local/bin/cloudy-banner ]; then' \
+        '      export CLOUDY_BANNER_SHOWN=1' \
+        '      /usr/local/bin/cloudy-banner' \
+        '    fi' \
+        '    ;;' \
+        'esac' \
+        > /etc/profile.d/00-cloudy-banner.sh; \
+    chmod 644 /etc/profile.d/00-cloudy-banner.sh; \
+    printf '%s\n' '' 'cd /root' '. /etc/profile.d/00-cloudy-banner.sh' >> /root/.bashrc; \
+    printf '%s\n' '[ -f /root/.bashrc ] && . /root/.bashrc # cloudy-banner' \
+        >> /root/.bash_profile; \
+    bash -n /etc/profile.d/00-cloudy-banner.sh; \
+    bash -n /usr/local/bin/cloudy-login; \
+    /usr/local/bin/cloudy-banner > /dev/null
 
 # Verify tmate really made it into the image (fail the build early if not)
 RUN tmate -V
