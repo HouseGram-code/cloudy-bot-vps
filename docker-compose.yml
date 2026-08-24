@@ -1,0 +1,20 @@
+services:
+  cloudy-bot:
+    build: .
+    image: cloudy-vps-bot:1.0-beta
+    container_name: cloudy-vps-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # The bot creates the "VPS" containers through the host Docker daemon.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Persist which user owns which server.
+      - ./data:/app/data
+      # Needed so the bot can build the guest image from its own context.
+      - ./images:/app/images:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -1,0 +1,19 @@
+# Local secrets / overrides (never commit)
+.env
+.env.local
+
+# Runtime state
+data/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
