@@ -18,8 +18,10 @@ import uuid
 import docker
 from docker.errors import APIError, ImageNotFound, NotFound
 
+from i18n import t
 from slots import SLOTS
 from config import (
+    COMMAND_PREFIX,
     CONTAINER_PREFIX,
     MAX_VPS_PER_USER,
     PLAN,
@@ -243,9 +245,8 @@ class VPSManager:
             used_total, total = self.capacity()
             if used_total >= total:
                 raise VPSError(
-                    f"**No free slots.** The host is full: "
-                    f"`{used_total}/{total}` VPS in use.\n"
-                    "Please wait until a slot frees up and try `!deploy` again."
+                    f"**{t(lang, 'slots.full_title')}** \u2014 `{used_total}/{total}`\n"
+                    + t(lang, "slots.full", total=total, prefix=COMMAND_PREFIX)
                 )
 
         if MAX_VPS_PER_USER and not is_owner(user_id):

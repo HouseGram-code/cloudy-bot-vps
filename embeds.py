@@ -82,7 +82,21 @@ def rules_embed(lang: str = DEFAULT_LANG) -> discord.Embed:
 # ---------------------------------------------------------------------------
 # !deploy
 # ---------------------------------------------------------------------------
-def deploy_offer_embed(user: discord.abc.User, lang: str = DEFAULT_LANG) -> discord.Embed:
+def capacity_line(stats: dict, lang: str = DEFAULT_LANG) -> str:
+    """One-line summary: `3/5 slots - 2 running - 1 stopped`."""
+    return t(
+        lang,
+        "slots.short",
+        used=int(stats.get("used", 0)),
+        total=int(stats.get("slots", 0)),
+        running=int(stats.get("running", 0)),
+        stopped=int(stats.get("stopped", 0)),
+    )
+
+
+def deploy_offer_embed(
+    user: discord.abc.User, lang: str = DEFAULT_LANG, stats: dict | None = None
+) -> discord.Embed:
     """The specs preview shown before the user presses Start."""
     embed = discord.Embed(
         title=f"{EMOJI['cloud']} {t(lang, 'deploy.title')}",
@@ -124,6 +138,12 @@ def deploy_offer_embed(user: discord.abc.User, lang: str = DEFAULT_LANG) -> disc
         value=f"`{PLAN['name']}` • {t(lang, 'deploy.location')}: `{PLAN['location']}`",
         inline=False,
     )
+    if stats:
+        embed.add_field(
+            name=f"{EMOJI['gear']} {t(lang, 'admin.capacity')}",
+            value=capacity_line(stats, lang),
+            inline=False,
+        )
     embed.add_field(
         name=f"{EMOJI['scroll']} {t(lang, 'btn.rules')}",
         value=t(lang, "deploy.rules_field", count=len(rules_for(lang))),
@@ -463,6 +483,11 @@ def help_embed(
         inline=False,
     )
     embed.add_field(name=f"`{prefix}destroy`", value=t(lang, "help.destroy"), inline=False)
+    embed.add_field(
+        name=f"`{prefix}slots` \u2022 `{prefix}\u0441\u043b\u043e\u0442\u044b`",
+        value=t(lang, "help.slots"),
+        inline=False,
+    )
     embed.add_field(name=f"`{prefix}ping`", value=t(lang, "help.ping"), inline=False)
     embed.add_field(
         name=f"`{prefix}lang` \u2022 `{prefix}язык`", value=t(lang, "help.lang"), inline=False

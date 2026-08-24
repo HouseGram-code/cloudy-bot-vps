@@ -391,6 +391,18 @@ STRINGS: dict[str, dict[str, str]] = {
             "\u041a\u043e\u0433\u0434\u0430 \u043f\u043e\u044f\u0432\u0438\u0442\u0441\u044f \u0441\u0432\u043e\u0431\u043e\u0434\u043d\u044b\u0439 \u0441\u043b\u043e\u0442, \u043c\u043e\u0436\u043d\u043e \u0441\u043e\u0437\u0434\u0430\u0442\u044c \u043d\u043e\u0432\u044b\u0439 \u0447\u0435\u0440\u0435\u0437 `{prefix}deploy`."
         ),
     },
+    "slots.presence": {
+        "en": "{used}/{total} slots \u2022 {running} online",
+        "ru": "{used}/{total} \u0441\u043b\u043e\u0442\u043e\u0432 \u2022 {running} \u043e\u043d\u043b\u0430\u0439\u043d",
+    },
+    "slots.short": {
+        "en": "**{used}/{total}** slots \u2022 {running} running \u2022 {stopped} stopped",
+        "ru": "**{used}/{total}** \u0441\u043b\u043e\u0442\u043e\u0432 \u2022 \u0437\u0430\u043f\u0443\u0449\u0435\u043d\u043e {running} \u2022 \u043e\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d\u043e {stopped}",
+    },
+    "help.slots": {
+        "en": "Free slots, how many servers are running and how many are stopped.",
+        "ru": "\u0421\u0432\u043e\u0431\u043e\u0434\u043d\u044b\u0435 \u0441\u043b\u043e\u0442\u044b, \u0441\u043a\u043e\u043b\u044c\u043a\u043e \u0441\u0435\u0440\u0432\u0435\u0440\u043e\u0432 \u0437\u0430\u043f\u0443\u0449\u0435\u043d\u043e \u0438 \u0441\u043a\u043e\u043b\u044c\u043a\u043e \u043e\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d\u043e.",
+    },
     "wipe.no_reason": {
         "en": "not specified",
         "ru": "\u043d\u0435 \u0443\u043a\u0430\u0437\u0430\u043d\u0430",

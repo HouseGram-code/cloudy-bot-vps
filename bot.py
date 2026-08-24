@@ -9,7 +9,7 @@ import logging
 import re
 
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 import embeds
 from config import (
@@ -21,7 +21,7 @@ from config import (
     OWNER_IDS,
     is_owner,
 )
-from i18n import LANGUAGES, LangStore, lang_label, normalize
+from i18n import DEFAULT_LANG, LANGUAGES, LangStore, lang_label, normalize
 from i18n import rules as rules_for
 from i18n import t
 from maintenance import MAINTENANCE
@@ -90,6 +90,48 @@ async def on_ready() -> None:
             log.info("Docker backend ready, VPS image available")
         except Exception as exc:
             log.error("Docker backend unavailable: %s", exc)
+    if not presence_loop.is_running():
+        presence_loop.start()
+
+
+async def _stats() -> dict:
+    """Live counters, or an empty dict when Docker is unavailable."""
+    if manager is None:
+        return {}
+    try:
+        return await manager.stats()
+    except Exception as exc:  # pragma: no cover
+        log.warning("could not read VPS stats: %s", exc)
+        return {}
+
+
+async def update_presence() -> None:
+    """Show the slot counters right in the bot's Discord status."""
+    stats = await _stats()
+    if stats:
+        text = t(
+            DEFAULT_LANG,
+            "slots.presence",
+            used=int(stats.get("used", 0)),
+            total=int(stats.get("slots", 0)),
+            running=int(stats.get("running", 0)),
+        )
+    else:
+        text = f"{COMMAND_PREFIX}deploy \u2022 free VPS"
+    try:
+        await bot.change_presence(activity=discord.Game(name=text))
+    except discord.HTTPException:
+        pass
+
+
+@tasks.loop(seconds=60)
+async def presence_loop() -> None:
+    await update_presence()
+
+
+@presence_loop.before_loop
+async def _before_presence_loop() -> None:
+    await bot.wait_until_ready()
 
 
 def _require_manager() -> VPSManager:
@@ -169,9 +211,12 @@ async def deploy(ctx: commands.Context) -> None:
         )
         return
 
+    stats = await _stats()
     view = DeployView(mgr, ctx.author.id, bans, lang=lang)
     msg = await ctx.reply(
-        embed=embeds.deploy_offer_embed(ctx.author, lang), view=view, mention_author=False
+        embed=embeds.deploy_offer_embed(ctx.author, lang, stats=stats or None),
+        view=view,
+        mention_author=False,
     )
     view.message = msg
 
@@ -274,6 +319,7 @@ async def destroy(ctx: commands.Context) -> None:
     try:
         mgr = _require_manager()
         await mgr.delete_vps(ctx.author.id)
+        await update_presence()
     except VPSError as exc:
         await ctx.reply(
             embed=embeds.error_embed(str(exc), lang=lang), mention_author=False
@@ -410,10 +456,15 @@ async def servers_cmd(ctx: commands.Context) -> None:
         )
         return
 
+    stats = await _stats()
+    header = embeds.capacity_line(stats, lang) + "\n" if stats else ""
+
     records = mgr.all_records()
     if not records:
         await ctx.reply(
-            embed=embeds.info_embed(f"{EMOJI['cloud']} Servers", "No servers deployed yet."),
+            embed=embeds.info_embed(
+                f"{EMOJI['cloud']} Servers", header + "No servers deployed yet."
+            ),
             mention_author=False,
         )
         return
@@ -425,7 +476,7 @@ async def servers_cmd(ctx: commands.Context) -> None:
     ]
     await ctx.reply(
         embed=embeds.info_embed(
-            f"{EMOJI['cloud']} Servers ({len(records)})", "\n".join(lines)
+            f"{EMOJI['cloud']} Servers ({len(records)})", header + "\n".join(lines)
         ),
         mention_author=False,
     )
@@ -548,6 +599,7 @@ async def slots_cmd(ctx: commands.Context, action: str = "", value: str = "") ->
 
     await SLOTS.set_total(target, ctx.author.id, str(ctx.author))
     stats = await mgr.stats()
+    await update_presence()
     await ctx.reply(
         embed=embeds.slots_changed_embed(old, stats, lang), mention_author=False
     )
@@ -612,6 +664,7 @@ async def wipe_cmd(ctx: commands.Context, target: str = "", *, reason: str = "")
         log.info("could not DM %s about the deleted VPS", user_id)
 
     stats = await mgr.stats()
+    await update_presence()
     await ctx.reply(
         embed=embeds.vps_wiped_embed(user_id, stats, lang), mention_author=False
     )
