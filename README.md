@@ -259,6 +259,35 @@ TMATE_PORTS=2200,22,443
 
 If every port is blocked, the error message now lists the ports that were tried
 plus the exact firewall commands to open one.
+If every port is blocked, the error message now lists the ports that were tried,
+the **tmate log for each attempt**, and the exact firewall commands to open one.
+
+> Important: 22 and 443 being "TCP OK" on `ssh.tmate.io` does **not** mean tmate
+> will work there — those ports are not the tmate relay, so the handshake is
+> refused. If outbound 2200 stays blocked, run your own relay (below).
+
+### Own relay when 2200 is blocked for good
+
+```bash
+RELAY_PORT=443 bash tools/setup_relay.sh    # or RELAY_PORT=8443, RELAY_HOST=vps.example.com
+./start.sh restart
+```
+
+The script starts `tmate-ssh-server` on this host on a port you choose, creates
+and reuses its host keys under `data/tmate-keys`, prints the matching
+`TMATE_SERVER_HOST` / `TMATE_PORTS` / `TMATE_RSA_FINGERPRINT` /
+`TMATE_ED25519_FINGERPRINT` values, and can append them to `.env` for you.
+Remember to open that port **inbound** (`sudo ufw allow 443/tcp`).
+
+### Fixed bug: tmate never started ("no log")
+
+The old session launcher ran `pkill -f 'tmate -S /tmp/cloudy.tmate.sock'`. That
+pattern also matches the `bash -lc "..."` process executing the script itself, so
+the shell killed itself before starting tmate — hence an empty log even when the
+network was fine. It now uses `tmate kill-server` plus the `[t]mate` bracket
+pattern, launches tmate with `setsid nohup ... </dev/null`, keeps a per-port log
+(`/tmp/cloudy.tmate.<port>.log`), and stops waiting as soon as the tmate process
+dies instead of burning the whole timeout.
 
 ---
 

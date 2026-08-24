@@ -422,17 +422,38 @@ class VPSManager:
         body = "\\n".join(lines)
         self._exec(container, f"printf '{body}\\n' > {TMATE_CONF}")
 
-    def _start_session(self, container, port: int, budget: float) -> str:
-        """Start a detached tmate session on `port`; return the ssh line or ""."""
+    def _kill_session(self, container) -> None:
+        """Stop a previous tmate server without killing our own shell.
+
+        NOTE: `pkill -f 'tmate -S <sock>'` also matches the `bash -lc "..."`
+        process that is running the script itself, so it used to SIGTERM its
+        own shell before tmate was ever started (that is why no tmate log was
+        produced). The `[t]mate` bracket trick keeps the pattern from matching
+        the command line that contains it.
+        """
+        self._exec(
+            container,
+            f"tmate -S {TMATE_SOCK} kill-server >/dev/null 2>&1; "
+            f"pkill -f '[t]mate -S {TMATE_SOCK}' >/dev/null 2>&1; "
+            f"rm -f {TMATE_SOCK}; exit 0",
+        )
+
+    def _start_session(self, container, port: int, budget: float) -> tuple[str, str]:
+        """Start a detached tmate session on `port`.
+
+        Returns (ssh_line, log_tail). `ssh_line` is empty when it did not work.
+        """
         self._write_tmate_conf(container, port)
+        self._kill_session(container)
+
+        port_log = f"/tmp/cloudy.tmate.{port}.log"
         start = (
-            f"pkill -f 'tmate -S {TMATE_SOCK}' >/dev/null 2>&1; "
-            f"rm -f {TMATE_SOCK} {TMATE_LOG}; "
+            f"rm -f {port_log}; "
             "mkdir -p /root/.ssh && chmod 700 /root/.ssh; "
             "export TERM=xterm-256color; "
-            f"nohup tmate -f {TMATE_CONF} -S {TMATE_SOCK} -F new-session -d "
-            f"'TERM=xterm-256color bash -l' > {TMATE_LOG} 2>&1 & "
-            "sleep 2; echo started"
+            f"setsid nohup tmate -f {TMATE_CONF} -S {TMATE_SOCK} -F new-session -d "
+            f"'TERM=xterm-256color bash -l' </dev/null > {port_log} 2>&1 & "
+            f"sleep 2; ln -sf {port_log} {TMATE_LOG}; echo started; exit 0"
         )
         self._exec(container, start)
 
@@ -447,9 +468,20 @@ class VPSManager:
                 "",
             )
             if code == 0 and candidate and "@" in candidate:
-                return candidate
+                return candidate, ""
+            # If tmate died (relay refused the handshake) there is no point in
+            # waiting for the whole budget - report the log straight away.
+            _, alive, _ = self._exec(
+                container, f"pgrep -f '[t]mate -S {TMATE_SOCK}' >/dev/null && echo yes"
+            )
+            if alive.strip() != "yes":
+                break
             time.sleep(2)
-        return ""
+
+        _, tail, _ = self._exec(
+            container, f"tail -n 8 {port_log} 2>/dev/null || echo 'no log'"
+        )
+        return "", (tail or "no log").strip()
 
     def _tmate_sync(self, user_id: int, force_new: bool = False) -> str:
         container = self._container(user_id)
@@ -483,6 +515,7 @@ class VPSManager:
 
         ssh_line = ""
         used_port = None
+        failures: list[str] = []
         for port in candidates:
             log.info(
                 "opening tmate session for %s via %s:%s",
@@ -490,27 +523,30 @@ class VPSManager:
                 TMATE_SERVER_HOST,
                 port,
             )
-            ssh_line = self._start_session(container, port, per_port)
+            ssh_line, tail = self._start_session(container, port, per_port)
             if ssh_line:
                 used_port = port
                 break
+            failures.append(f"[port {port}]\n{tail}")
 
         if not ssh_line:
             diag = self._network_diagnostics(container)
             tried = ", ".join(str(p) for p in candidates)
+            fail_log = "\n".join(failures)[-700:]
             raise VPSError(
                 "**Could not open a tmate session.**\n"
-                f"Tried `{TMATE_SERVER_HOST}` on TCP **{tried}** and every port was "
-                "blocked. Allow outbound traffic on at least one of them, e.g.:\n"
-                "```bash\n"
-                "sudo ufw allow out 2200/tcp\n"
-                "# or, on nftables/iptables hosts:\n"
-                "sudo iptables -A OUTPUT -p tcp --dport 2200 -j ACCEPT\n"
-                "```\n"
-                "If your provider blocks unusual ports entirely, point the bot at a "
-                "self-hosted relay with `TMATE_SERVER_HOST`, `TMATE_PORTS`, "
-                "`TMATE_RSA_FINGERPRINT` and `TMATE_ED25519_FINGERPRINT` in `.env`.\n"
-                f"```\n{diag[-900:]}\n```"
+                f"Tried `{TMATE_SERVER_HOST}` on TCP **{tried}** — none of them "
+                "completed the tmate handshake.\n"
+                "Most common causes:\n"
+                "\u2022 the relay port (2200) is blocked outbound → "
+                "`sudo ufw allow out 2200/tcp` "
+                "(or `sudo iptables -A OUTPUT -p tcp --dport 2200 -j ACCEPT`)\n"
+                "\u2022 only 22/443 are open, but those ports on `ssh.tmate.io` are "
+                "not the tmate relay, so the handshake is refused → run your own "
+                "relay on an allowed port with `bash tools/setup_relay.sh` and put "
+                "the printed `TMATE_*` values in `.env`.\n"
+                f"```\n{fail_log or 'no tmate output'}\n```\n"
+                f"```\n{diag[-700:]}\n```"
             )
 
         record["ssh"] = ssh_line
