@@ -98,9 +98,11 @@ RUN set -eux; \
         'esac' \
         > /etc/profile.d/00-cloudy-banner.sh; \
     chmod 644 /etc/profile.d/00-cloudy-banner.sh; \
-    printf '%s\n' '' 'cd /root' '. /etc/profile.d/00-cloudy-banner.sh' >> /root/.bashrc; \
-    printf '%s\n' '[ -f /root/.bashrc ] && . /root/.bashrc # cloudy-banner' \
-        >> /root/.bash_profile; \
+    printf '%s\n' '' 'cd /root' \
+        '[ -f /etc/profile.d/00-cloudy-banner.sh ] && . /etc/profile.d/00-cloudy-banner.sh # cloudy-banner' \
+        >> /root/.bashrc; \
+    printf '%s\n' '[ -f /root/.bashrc ] && . /root/.bashrc' >> /root/.bash_profile; \
+    bash -n /root/.bashrc; \
     bash -n /etc/profile.d/00-cloudy-banner.sh; \
     bash -n /usr/local/bin/cloudy-login; \
     /usr/local/bin/cloudy-banner > /dev/null

@@ -26,9 +26,7 @@ fi
 
 # ---- facts -----------------------------------------------------------------
 os_name="$( . /etc/os-release 2>/dev/null; printf '%s' "${PRETTY_NAME:-Linux}" )"
-host_name="$(hostname 2>/dev/null)"
-[ -n "$host_name" ] || host_name="$(cat /etc/hostname 2>/dev/null)"
-[ -n "$host_name" ] || host_name="${HOSTNAME:-vps}"
+host_name="$(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || printf '%s' "${HOSTNAME:-vps}")"
 ip_addr="$(hostname -I 2>/dev/null | awk '{print $1}')"
 [ -n "$ip_addr" ] || ip_addr="-"
 
@@ -64,13 +62,37 @@ fi
 [ "$mem_total" -gt 0 ] 2>/dev/null || mem_total=1
 mem_pct=$(( mem_used * 100 / mem_total ))
 
-# Disk: usage of / but capped by the plan size when the bot passes it.
-disk_used_g="$(df -B1G / 2>/dev/null | awk 'NR==2{gsub("G","",$3); print $3+0}')"
-[ -n "$disk_used_g" ] || disk_used_g=0
-disk_total_g="${CLOUDY_DISK_GB:-$(df -B1G / 2>/dev/null | awk 'NR==2{gsub("G","",$2); print $2+0}')}"
+# Disk: `df /` reports the whole host filesystem when no storage quota is
+# applied to the container, which used to render a bogus "10/10 G". Trust df
+# only when its size really matches the plan, otherwise measure the data the
+# user actually owns.
+disk_total_g="${CLOUDY_DISK_GB:-0}"
+df_total_g="$(df -BG / 2>/dev/null | awk 'NR==2{gsub("G","",$2); print $2+0}')"
+df_used_m="$(df -BM / 2>/dev/null | awk 'NR==2{gsub("M","",$3); print $3+0}')"
+[ -n "$df_total_g" ] || df_total_g=0
+[ -n "$df_used_m" ] || df_used_m=0
+
+if [ "$disk_total_g" -le 0 ] 2>/dev/null; then
+	disk_total_g="$df_total_g"
+	disk_used_m="$df_used_m"
+elif [ "$df_total_g" -le "$disk_total_g" ] 2>/dev/null; then
+	# a real quota is in place, df is trustworthy
+	disk_used_m="$df_used_m"
+else
+	# no quota: count the writable data instead of the whole host disk
+	disk_used_m="$(timeout 4 du -sxm /root /home /var/log /tmp /opt /srv 2>/dev/null \
+		| awk '{s+=$1} END{printf "%d", s}')"
+	[ -n "$disk_used_m" ] || disk_used_m=0
+fi
 [ "$disk_total_g" -gt 0 ] 2>/dev/null || disk_total_g=1
-[ "$disk_used_g" -gt "$disk_total_g" ] 2>/dev/null && disk_used_g="$disk_total_g"
-disk_pct=$(( disk_used_g * 100 / disk_total_g ))
+disk_total_m=$(( disk_total_g * 1024 ))
+[ "$disk_used_m" -gt "$disk_total_m" ] 2>/dev/null && disk_used_m="$disk_total_m"
+disk_pct=$(( disk_used_m * 100 / disk_total_m ))
+if [ "$disk_used_m" -ge 1024 ] 2>/dev/null; then
+	disk_used_txt="$(awk -v m="$disk_used_m" 'BEGIN{printf "%.1fG", m/1024}')"
+else
+	disk_used_txt="${disk_used_m}M"
+fi
 
 uptime_h="$(awk '{s=int($1); d=int(s/86400); h=int((s%86400)/3600); m=int((s%3600)/60);
 	if (d>0) printf "%dd %dh", d, h; else if (h>0) printf "%dh %dm", h, m; else printf "%dm", m}' /proc/uptime)"
@@ -97,8 +119,8 @@ printf "  ${CY}${B}☁ CLOUDY VPS${R}  ${GY}·${R}  ${B}%s${R}  ${GY}·${R}  ${Y
 	"$os_name" "$L_TIER"
 printf "  ${GY}%s (%s)${R}  ${GY}·${R}  ${GY}%s${R} ${B}%s${R}\n" \
 	"$host_name" "$ip_addr" "$L_UP" "$uptime_h"
-printf "  ${B}%s${R} %s ${B}%s${R}/%s MB   ${B}%s${R} %s ${B}%s${R}/%s G   ${B}%s${R} ${B}%s${R}\n" \
-	"$L_RAM"  "$(bar "$mem_pct")"  "$mem_used"     "$mem_total" \
-	"$L_DISK" "$(bar "$disk_pct")" "$disk_used_g" "$disk_total_g" \
+printf "  ${B}%s${R} %s ${B}%s${R}/%s MB   ${B}%s${R} %s ${B}%s${R}/%sG   ${B}%s${R} ${B}%s${R}\n" \
+	"$L_RAM"  "$(bar "$mem_pct")"  "$mem_used"       "$mem_total" \
+	"$L_DISK" "$(bar "$disk_pct")" "$disk_used_txt" "$disk_total_g" \
 	"$L_CPU"  "$cpu"
 printf "  ${GY}%s${R}\n\n" "$L_HINT"

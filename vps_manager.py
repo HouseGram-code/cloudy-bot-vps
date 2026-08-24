@@ -224,7 +224,7 @@ class VPSManager:
                 "TERM": "xterm-256color",
                 "LANG": "C.UTF-8",
                 "CLOUDY_LANG": "ru" if str(lang).startswith("ru") else "en",
-                # The banner shows the plan limits, not the metrics of the host.
+                # The banner shows the plan limits, not the host metrics.
                 "CLOUDY_RAM_MB": str(PLAN["ram_mb"]),
                 "CLOUDY_DISK_GB": str(PLAN["disk_gb"]),
                 "CLOUDY_CPU": str(PLAN["cpu_cores"]),
@@ -330,7 +330,21 @@ class VPSManager:
         }
         hook_b64 = b64(BANNER_HOOK % fields)
         login_b64 = b64(LOGIN_WRAPPER % fields)
-        clean = "/cloudy-banner/d;/cloudy-login/d;/^alias banner=/d;/^export CLOUDY_LANG=/d"
+
+        # Deleting single lines that merely *mention* cloudy-banner used to cut
+        # lines out of the middle of the hook's `if` block and left an orphan
+        # `fi` behind ("syntax error near unexpected token `fi'"). Instead, cut
+        # everything from the first Cloudy-managed line to the end of the file
+        # and append ONE line that sources the hook.
+        cut = (
+            "awk '/cloudy-banner|cloudy-login|CLOUDY_BANNER_SHOWN|CLOUDY_LANG|"
+            "CLOUDY_RAM_MB|CLOUDY_DISK_GB|CLOUDY_CPU|alias banner=/{cut=1} "
+            "cut!=1{print}'"
+        )
+        source_line = (
+            "[ -f /etc/profile.d/00-cloudy-banner.sh ] && "
+            ". /etc/profile.d/00-cloudy-banner.sh # cloudy-banner"
+        )
 
         script = (
             "set -e; mkdir -p /usr/local/bin /etc/profile.d; "
@@ -344,16 +358,25 @@ class VPSManager:
             ": > /etc/motd; rm -f /etc/update-motd.d/* 2>/dev/null || true; "
             ": > /etc/legal 2>/dev/null || true; "
             "touch /root/.hushlogin /root/.bashrc /root/.bash_profile; "
-            f"sed -i '{clean}' /root/.bashrc /root/.bash_profile 2>/dev/null || true; "
-            f"printf '%s' '{hook_b64}' | base64 -d >> /root/.bashrc; "
-            "printf '%s\\n' '[ -f /root/.bashrc ] && . /root/.bashrc # cloudy-banner' "
+            # drop any previously injected (possibly broken) block
+            "for f in /root/.bashrc /root/.bash_profile; do "
+            f"{cut} \"$f\" > \"$f.cloudy\" 2>/dev/null && mv \"$f.cloudy\" \"$f\"; done; "
+            f"printf '%s\\n' {json.dumps(source_line)} >> /root/.bashrc; "
+            "printf '%s\\n' '[ -f /root/.bashrc ] && . /root/.bashrc' "
             ">> /root/.bash_profile; "
+            # the rc files must stay syntactically valid
+            "bash -n /root/.bashrc 2>/dev/null || echo 'bashrc-broken' >&2; "
+            f"bash -n {PROFILE_HOOK} 2>/dev/null || echo 'hook-broken' >&2; "
             # sanity check: the banner must actually run inside the guest
             f"CLOUDY_LANG={guest_lang} {BANNER_PATH} >/dev/null 2>&1 || "
             "echo 'banner-selftest-failed' >&2; exit 0"
         )
         code, _out, err = self._exec(container, script)
-        if code != 0 or "banner-selftest-failed" in (err or ""):
+        bad = any(
+            marker in (err or "")
+            for marker in ("banner-selftest-failed", "bashrc-broken", "hook-broken")
+        )
+        if code != 0 or bad:
             log.warning("banner install issue (%s): %s", code, err or "selftest failed")
         else:
             log.info("banner installed in %s (%s)", container.short_id, guest_lang)
