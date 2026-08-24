@@ -26,6 +26,7 @@ from i18n import rules as rules_for
 from i18n import t
 from maintenance import MAINTENANCE
 from moderation import BanStore, ModerationError
+from slots import MAX_SLOTS, MIN_SLOTS, SLOTS
 from views import AdminView, DeployView, LanguageView, ManageView
 from vps_manager import VPSError, VPSManager
 
@@ -65,7 +66,16 @@ class UnderMaintenance(commands.CheckFailure):
 
 
 # Commands that keep working while maintenance mode is ON.
-MAINTENANCE_ALLOWED = {"rules", "lang", "help", "ping", "admin", "maintenance"}
+MAINTENANCE_ALLOWED = {
+    "rules",
+    "lang",
+    "help",
+    "ping",
+    "admin",
+    "maintenance",
+    "slots",
+    "wipe",
+}
 
 
 @bot.event
@@ -424,10 +434,12 @@ async def servers_cmd(ctx: commands.Context) -> None:
 @bot.command(name="admin", aliases=["panel", "\u0430\u0434\u043c\u0438\u043d", "\u043f\u0430\u043d\u0435\u043b\u044c"])
 @owner_only()
 async def admin_cmd(ctx: commands.Context) -> None:
-    """!admin - staff panel with the maintenance switch."""
+    """!admin - staff panel: maintenance switch and VPS slots."""
     lang = lang_of(ctx.author)
-    view = AdminView(ctx.author.id, MAINTENANCE, manager, bans, lang=lang)
-    msg = await ctx.reply(embed=view.panel_embed(), view=view, mention_author=False)
+    view = AdminView(ctx.author.id, MAINTENANCE, manager, bans, lang=lang, slots=SLOTS)
+    embed = await view.build_embed()
+    view.sync_buttons()
+    msg = await ctx.reply(embed=embed, view=view, mention_author=False)
     view.message = msg
 
 
@@ -454,8 +466,12 @@ async def maintenance_cmd(
         state = await MAINTENANCE.disable(ctx.author.id, str(ctx.author))
     elif not choice:
         # No argument: show the panel instead of guessing.
-        view = AdminView(ctx.author.id, MAINTENANCE, manager, bans, lang=lang)
-        msg = await ctx.reply(embed=view.panel_embed(), view=view, mention_author=False)
+        view = AdminView(
+            ctx.author.id, MAINTENANCE, manager, bans, lang=lang, slots=SLOTS
+        )
+        embed = await view.build_embed()
+        view.sync_buttons()
+        msg = await ctx.reply(embed=embed, view=view, mention_author=False)
         view.message = msg
         return
     else:
@@ -469,6 +485,135 @@ async def maintenance_cmd(
 
     await ctx.reply(
         embed=embeds.maintenance_toggled_embed(state, lang), mention_author=False
+    )
+
+
+@bot.command(name="slots", aliases=["capacity", "\u0441\u043b\u043e\u0442\u044b"])
+async def slots_cmd(ctx: commands.Context, action: str = "", value: str = "") -> None:
+    """!slots - show capacity. Staff: !slots +1 | -1 | set N."""
+    lang = lang_of(ctx.author)
+    try:
+        mgr = _require_manager()
+    except VPSError as exc:
+        await ctx.reply(
+            embed=embeds.error_embed(str(exc), lang=lang), mention_author=False
+        )
+        return
+
+    raw = (action or "").strip().lower()
+
+    # Everyone may look at the counters.
+    if not raw:
+        stats = await mgr.stats()
+        await ctx.reply(embed=embeds.slots_embed(stats, lang), mention_author=False)
+        return
+
+    # Changing the limit is staff only.
+    if not is_owner(ctx.author.id):
+        raise commands.CheckFailure("staff_only")
+
+    old = SLOTS.total
+    target: int | None = None
+
+    if raw in {"set", "=", "\u0443\u0441\u0442\u0430\u043d\u043e\u0432\u0438\u0442\u044c"}:
+        try:
+            target = int(value)
+        except (TypeError, ValueError):
+            target = None
+    elif raw in {"+", "add", "up", "\u0431\u043e\u043b\u044c\u0448\u0435"}:
+        target = old + (int(value) if value.lstrip("+-").isdigit() else 1)
+    elif raw in {"-", "remove", "down", "\u043c\u0435\u043d\u044c\u0448\u0435"}:
+        target = old - (int(value) if value.lstrip("+-").isdigit() else 1)
+    elif raw.lstrip("+-").isdigit():
+        # "+1" / "-2" are relative, a bare number is absolute.
+        target = old + int(raw) if raw[0] in "+-" else int(raw)
+
+    if target is None:
+        await ctx.reply(
+            embed=embeds.error_embed(
+                t(lang, "slots.usage", prefix=COMMAND_PREFIX), lang=lang
+            ),
+            mention_author=False,
+        )
+        return
+
+    if target < MIN_SLOTS or target > MAX_SLOTS:
+        await ctx.reply(
+            embed=embeds.error_embed(
+                t(lang, "slots.limit", min=MIN_SLOTS, max=MAX_SLOTS), lang=lang
+            ),
+            mention_author=False,
+        )
+        return
+
+    await SLOTS.set_total(target, ctx.author.id, str(ctx.author))
+    stats = await mgr.stats()
+    await ctx.reply(
+        embed=embeds.slots_changed_embed(old, stats, lang), mention_author=False
+    )
+    await ctx.send(embed=embeds.slots_embed(stats, lang))
+
+
+@bot.command(
+    name="wipe",
+    aliases=[
+        "delvps",
+        "forcedestroy",
+        "\u0443\u0434\u0430\u043b\u0438\u0442\u044c",
+        "\u0441\u043d\u0435\u0441\u0442\u0438",
+    ],
+)
+@owner_only()
+async def wipe_cmd(ctx: commands.Context, target: str = "", *, reason: str = "") -> None:
+    """!wipe <@user|id> [reason] - delete somebody else's VPS and free the slot."""
+    lang = lang_of(ctx.author)
+    if not target:
+        await ctx.reply(
+            embed=embeds.error_embed(
+                t(lang, "wipe.usage", prefix=COMMAND_PREFIX), lang=lang
+            ),
+            mention_author=False,
+        )
+        return
+
+    try:
+        mgr = _require_manager()
+        user_id, _name = await _resolve_user_id(ctx, target)
+    except (VPSError, ModerationError) as exc:
+        await ctx.reply(
+            embed=embeds.error_embed(str(exc), lang=lang), mention_author=False
+        )
+        return
+
+    if not await mgr.has_vps(user_id):
+        await ctx.reply(
+            embed=embeds.error_embed(
+                t(lang, "wipe.none", user=user_id), lang=lang
+            ),
+            mention_author=False,
+        )
+        return
+
+    try:
+        await mgr.delete_vps(user_id)
+    except VPSError as exc:
+        await ctx.reply(
+            embed=embeds.error_embed(str(exc), lang=lang), mention_author=False
+        )
+        return
+
+    # Tell the owner what happened, in their own language.
+    try:
+        victim = bot.get_user(user_id) or await bot.fetch_user(user_id)
+        await victim.send(
+            embed=embeds.vps_wiped_notice_embed(reason, lang_of(user_id))
+        )
+    except (discord.HTTPException, AttributeError):
+        log.info("could not DM %s about the deleted VPS", user_id)
+
+    stats = await mgr.stats()
+    await ctx.reply(
+        embed=embeds.vps_wiped_embed(user_id, stats, lang), mention_author=False
     )
 
 

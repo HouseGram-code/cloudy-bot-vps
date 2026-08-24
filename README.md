@@ -404,12 +404,47 @@ into the guest as `/usr/local/bin/cloudy-banner`, wipes the old Ubuntu MOTD (`/e
 So old containers and old images get the new banner too — just restart the VPS from `!manage`
 (or `!destroy` + `!deploy` for a clean box). Type `banner` inside the VPS to print it again.
 
+## Slots (global capacity)
+
+The host has a fixed number of slots, shown everywhere as `used/total`
+(for example `5/5`).
+
+```
+!slots            # anyone: running / stopped / free, e.g. 3 running, 1 stopped, 4/5
+!slots +1         # staff: one more slot
+!slots -1         # staff: one slot less
+!slots set 10     # staff: absolute value (0 - 500)
+```
+
+* The counters come from Docker itself (`cloudy.vps=true` labels), so they are
+  correct even if `data/vps_state.json` was lost.
+* When `used >= total` a regular user who runs `!deploy` gets a
+  **"No free slots"** card and no container is created. Staff bypass the limit.
+* The limit is stored in `SLOTS_FILE` (`data/slots.json`), so it survives
+  restarts. `TOTAL_VPS_SLOTS` is only the initial value.
+* `!admin` shows Capacity / Running / Stopped / Free and has working
+  **➖ -1 slot** and **➕ +1 slot** buttons next to the maintenance switch.
+
+## Deleting somebody else's VPS
+
+When a user's server misbehaves, staff can free the slot immediately:
+
+```
+!wipe @user               # delete their VPS
+!wipe 1264586393594630239 abuse of resources   # with a reason
+```
+
+Aliases: `!delvps`, `!forcedestroy`, `!удалить`, `!снести`. The owner gets a DM
+in their own language explaining that staff deleted the VPS and why, and the
+freed slot is reported back in the confirmation card.
+
 ## VPS quota
 
 | Role | Limit |
 | --- | --- |
 | Regular user | `MAX_VPS_PER_USER` (default **1**) |
 | Staff (`OWNER_IDS`) | unlimited |
+| Whole host | `TOTAL_VPS_SLOTS` slots, live-editable with `!slots` |
 
 The limit is enforced by counting real Docker containers labelled
 `cloudy.owner=<discord id>`, so it keeps working even if `data/vps_state.json`

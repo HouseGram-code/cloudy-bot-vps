@@ -143,8 +143,12 @@ PLAN = {
 VPS_IMAGE = os.getenv("VPS_IMAGE", "cloudy-vps:ubuntu-22.04")
 CONTAINER_PREFIX = os.getenv("CONTAINER_PREFIX", "cloudy-vps")
 MAX_VPS_PER_USER = int(os.getenv("MAX_VPS_PER_USER", "1"))
+# Global capacity of the host: how many VPS may exist at the same time (5/5).
+# Staff can change it at runtime from the admin panel or with `!slots`.
+TOTAL_VPS_SLOTS = int(os.getenv("TOTAL_VPS_SLOTS", "5"))
 STATE_FILE = os.getenv("STATE_FILE", "/app/data/vps_state.json")
 BAN_FILE = os.getenv("BAN_FILE", "/app/data/bans.json")
+SLOTS_FILE = os.getenv("SLOTS_FILE", "/app/data/slots.json")
 
 # DNS servers given to guest containers so tmate.io always resolves.
 VPS_DNS = [s.strip() for s in os.getenv("VPS_DNS", "1.1.1.1,8.8.8.8").split(",") if s.strip()]

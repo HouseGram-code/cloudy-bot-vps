@@ -298,6 +298,103 @@ STRINGS: dict[str, dict[str, str]] = {
         "ru": "\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d\u0438\u0435: `{prefix}maintenance on [\u043f\u0440\u0438\u0447\u0438\u043d\u0430]` \u0438\u043b\u0438 `{prefix}maintenance off`",
     },
     "admin.only_staff": {"en": "This panel is for staff only.", "ru": "\u042d\u0442\u0430 \u043f\u0430\u043d\u0435\u043b\u044c \u0442\u043e\u043b\u044c\u043a\u043e \u0434\u043b\u044f \u0430\u0434\u043c\u0438\u043d\u043e\u0432."},
+    # ---- capacity / slots ----
+    "admin.capacity": {"en": "Capacity", "ru": "\u0421\u043b\u043e\u0442\u044b"},
+    "admin.running": {"en": "Running", "ru": "\u0417\u0430\u043f\u0443\u0449\u0435\u043d\u043e"},
+    "admin.stopped": {"en": "Stopped", "ru": "\u041e\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d\u043e"},
+    "admin.btn_slot_plus": {"en": "+1 slot", "ru": "+1 \u0441\u043b\u043e\u0442"},
+    "admin.btn_slot_minus": {"en": "-1 slot", "ru": "-1 \u0441\u043b\u043e\u0442"},
+    "slots.title": {"en": "Host capacity", "ru": "\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u0430 \u0445\u043e\u0441\u0442\u0430"},
+    "slots.desc": {
+        "en": "**{used}/{total}** slots in use \u2022 **{free}** free",
+        "ru": "\u0417\u0430\u043d\u044f\u0442\u043e **{used}/{total}** \u0441\u043b\u043e\u0442\u043e\u0432 \u2022 \u0441\u0432\u043e\u0431\u043e\u0434\u043d\u043e **{free}**",
+    },
+    "slots.running": {"en": "Running", "ru": "\u0417\u0430\u043f\u0443\u0449\u0435\u043d\u043e"},
+    "slots.stopped": {"en": "Stopped", "ru": "\u041e\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d\u043e"},
+    "slots.free": {"en": "Free", "ru": "\u0421\u0432\u043e\u0431\u043e\u0434\u043d\u043e"},
+    "slots.full_title": {
+        "en": "No free slots",
+        "ru": "\u0421\u0432\u043e\u0431\u043e\u0434\u043d\u044b\u0445 \u0441\u043b\u043e\u0442\u043e\u0432 \u043d\u0435\u0442",
+    },
+    "slots.full": {
+        "en": (
+            "All **{total}** slots are busy right now, so new servers cannot be "
+            "created. Try `{prefix}deploy` again later - a slot frees up as soon "
+            "as someone deletes their VPS."
+        ),
+        "ru": (
+            "\u0412\u0441\u0435 **{total}** \u0441\u043b\u043e\u0442\u043e\u0432 \u0437\u0430\u043d\u044f\u0442\u044b, \u043f\u043e\u044d\u0442\u043e\u043c\u0443 \u043d\u043e\u0432\u044b\u0435 \u0441\u0435\u0440\u0432\u0435\u0440\u044b \u0441\u043e\u0437\u0434\u0430\u0442\u044c \u043d\u0435\u043b\u044c\u0437\u044f. "
+            "\u041f\u043e\u043f\u0440\u043e\u0431\u0443\u0439\u0442\u0435 `{prefix}deploy` \u043f\u043e\u0437\u0436\u0435 \u2014 \u0441\u043b\u043e\u0442 \u043e\u0441\u0432\u043e\u0431\u043e\u0434\u0438\u0442\u0441\u044f, \u043a\u0430\u043a \u0442\u043e\u043b\u044c\u043a\u043e \u043a\u0442\u043e-\u0442\u043e \u0443\u0434\u0430\u043b\u0438\u0442 \u0441\u0432\u043e\u0439 VPS."
+        ),
+    },
+    "slots.changed_title": {
+        "en": "Slots updated",
+        "ru": "\u0421\u043b\u043e\u0442\u044b \u043e\u0431\u043d\u043e\u0432\u043b\u0435\u043d\u044b",
+    },
+    "slots.changed": {
+        "en": "Capacity changed: **{old} \u2192 {new}** slots (in use: **{used}**).",
+        "ru": "\u041b\u0438\u043c\u0438\u0442 \u0438\u0437\u043c\u0435\u043d\u0451\u043d: **{old} \u2192 {new}** \u0441\u043b\u043e\u0442\u043e\u0432 (\u0437\u0430\u043d\u044f\u0442\u043e: **{used}**).",
+    },
+    "slots.below_used": {
+        "en": (
+            "Heads up: **{used}** servers already exist, so the limit is now "
+            "lower than the number of running VPS. Nothing was deleted - new "
+            "deployments are simply blocked."
+        ),
+        "ru": (
+            "\u0412\u043d\u0438\u043c\u0430\u043d\u0438\u0435: \u0441\u0435\u0440\u0432\u0435\u0440\u043e\u0432 \u0443\u0436\u0435 **{used}**, \u0442\u0430\u043a \u0447\u0442\u043e \u043b\u0438\u043c\u0438\u0442 \u043d\u0438\u0436\u0435 \u0442\u0435\u043a\u0443\u0449\u0435\u0433\u043e \u0447\u0438\u0441\u043b\u0430 VPS. "
+            "\u041d\u0438\u0447\u0435\u0433\u043e \u043d\u0435 \u0443\u0434\u0430\u043b\u0435\u043d\u043e \u2014 \u043f\u0440\u043e\u0441\u0442\u043e \u043d\u0435\u043b\u044c\u0437\u044f \u0441\u043e\u0437\u0434\u0430\u0432\u0430\u0442\u044c \u043d\u043e\u0432\u044b\u0435."
+        ),
+    },
+    "slots.usage": {
+        "en": (
+            "Usage: `{prefix}slots` \u2022 `{prefix}slots +1` \u2022 `{prefix}slots -1` "
+            "\u2022 `{prefix}slots set 10`"
+        ),
+        "ru": (
+            "\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d\u0438\u0435: `{prefix}slots` \u2022 `{prefix}slots +1` \u2022 `{prefix}slots -1` "
+            "\u2022 `{prefix}slots set 10`"
+        ),
+    },
+    "slots.limit": {
+        "en": "Slots must be between **{min}** and **{max}**.",
+        "ru": "\u0421\u043b\u043e\u0442\u043e\u0432 \u043c\u043e\u0436\u0435\u0442 \u0431\u044b\u0442\u044c \u043e\u0442 **{min}** \u0434\u043e **{max}**.",
+    },
+    # ---- staff: delete somebody else's VPS ----
+    "wipe.title": {
+        "en": "VPS deleted",
+        "ru": "VPS \u0443\u0434\u0430\u043b\u0451\u043d",
+    },
+    "wipe.done": {
+        "en": "The VPS of <@{user}> was deleted. Free slots now: **{free}/{total}**.",
+        "ru": "VPS \u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044f <@{user}> \u0443\u0434\u0430\u043b\u0451\u043d. \u0421\u0432\u043e\u0431\u043e\u0434\u043d\u043e \u0441\u043b\u043e\u0442\u043e\u0432: **{free}/{total}**.",
+    },
+    "wipe.none": {
+        "en": "<@{user}> does not have a VPS.",
+        "ru": "\u0423 <@{user}> \u043d\u0435\u0442 VPS.",
+    },
+    "wipe.usage": {
+        "en": "Usage: `{prefix}wipe @user` or `{prefix}wipe <user id>`",
+        "ru": "\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d\u0438\u0435: `{prefix}wipe @\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044c` \u0438\u043b\u0438 `{prefix}wipe <id>`",
+    },
+    "wipe.notice_title": {
+        "en": "Your VPS was deleted by staff",
+        "ru": "\u0412\u0430\u0448 VPS \u0443\u0434\u0430\u043b\u0451\u043d \u0430\u0434\u043c\u0438\u043d\u043e\u043c",
+    },
+    "wipe.notice": {
+        "en": (
+            "A staff member deleted your VPS.\n**Reason:** {reason}\n\n"
+            "You can create a new one with `{prefix}deploy` when a slot is free."
+        ),
+        "ru": (
+            "\u0410\u0434\u043c\u0438\u043d\u0438\u0441\u0442\u0440\u0430\u0442\u043e\u0440 \u0443\u0434\u0430\u043b\u0438\u043b \u0432\u0430\u0448 VPS.\n**\u041f\u0440\u0438\u0447\u0438\u043d\u0430:** {reason}\n\n"
+            "\u041a\u043e\u0433\u0434\u0430 \u043f\u043e\u044f\u0432\u0438\u0442\u0441\u044f \u0441\u0432\u043e\u0431\u043e\u0434\u043d\u044b\u0439 \u0441\u043b\u043e\u0442, \u043c\u043e\u0436\u043d\u043e \u0441\u043e\u0437\u0434\u0430\u0442\u044c \u043d\u043e\u0432\u044b\u0439 \u0447\u0435\u0440\u0435\u0437 `{prefix}deploy`."
+        ),
+    },
+    "wipe.no_reason": {
+        "en": "not specified",
+        "ru": "\u043d\u0435 \u0443\u043a\u0430\u0437\u0430\u043d\u0430",
+    },
 }
 
 RULES_I18N: dict[str, list[tuple[str, str]]] = {

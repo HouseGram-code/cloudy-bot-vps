@@ -18,6 +18,7 @@ import uuid
 import docker
 from docker.errors import APIError, ImageNotFound, NotFound
 
+from slots import SLOTS
 from config import (
     CONTAINER_PREFIX,
     MAX_VPS_PER_USER,
@@ -100,6 +101,8 @@ class VPSManager:
             ) from exc
         self._lock = asyncio.Lock()
         self._state: dict = {"servers": {}}
+        # Global slot limit (e.g. 5/5) shared with the bot and the admin panel.
+        self.slots = SLOTS
         self._load_state()
 
     # ------------------------------------------------------------------
@@ -143,6 +146,45 @@ class VPSManager:
         return list(self._state["servers"].values())
 
     # ------------------------------------------------------------------
+    # Global capacity (slots)
+    # ------------------------------------------------------------------
+    def _all_vps_containers(self) -> list:
+        """Every guest container created by the bot (running or stopped)."""
+        try:
+            return self.client.containers.list(
+                all=True, filters={"label": "cloudy.vps=true"}
+            )
+        except APIError as exc:  # pragma: no cover
+            log.warning("could not list VPS containers: %s", exc)
+            return []
+
+    def _stats_sync(self) -> dict:
+        """Live counters for the admin panel: running / stopped / slots."""
+        running = stopped = 0
+        for container in self._all_vps_containers():
+            try:
+                status = container.status
+            except Exception:  # pragma: no cover
+                status = ""
+            if status == "running":
+                running += 1
+            else:
+                stopped += 1
+        used = running + stopped
+        total = self.slots.total if self.slots is not None else used
+        return {
+            "running": running,
+            "stopped": stopped,
+            "used": used,
+            "slots": int(total),
+            "free": max(0, int(total) - used),
+            "full": used >= int(total),
+        }
+
+    async def stats(self) -> dict:
+        return await asyncio.to_thread(self._stats_sync)
+
+    # ------------------------------------------------------------------
     # Image build
     # ------------------------------------------------------------------
     def _ensure_image_sync(self) -> None:
@@ -178,6 +220,12 @@ class VPSManager:
             if int(rec.get("owner_id", -1)) == int(user_id)
         ]
 
+    def capacity(self) -> tuple[int, int]:
+        """Return (used, slots) for the whole host."""
+        used = len(self._all_vps_containers())
+        total = self.slots.total if self.slots is not None else used
+        return used, int(total)
+
     def quota(self, user_id: int) -> tuple[int, int | None]:
         """Return (used, limit). `limit` is None for staff = unlimited."""
         used = len(self._owned_containers(user_id))
@@ -189,6 +237,17 @@ class VPSManager:
         # Hard quota: regular users get MAX_VPS_PER_USER (1), staff unlimited.
         # Counting real containers instead of state entries keeps the limit
         # working even if the state file was lost or edited by hand.
+        # Global capacity: when every slot is taken nobody but staff can
+        # deploy a new VPS until one is deleted or the limit is raised.
+        if self.slots is not None and not is_owner(user_id):
+            used_total, total = self.capacity()
+            if used_total >= total:
+                raise VPSError(
+                    f"**No free slots.** The host is full: "
+                    f"`{used_total}/{total}` VPS in use.\n"
+                    "Please wait until a slot frees up and try `!deploy` again."
+                )
+
         if MAX_VPS_PER_USER and not is_owner(user_id):
             used = len(self._owned_containers(user_id))
             if used >= int(MAX_VPS_PER_USER):

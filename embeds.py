@@ -473,7 +473,8 @@ def help_embed(
             value=(
                 f"`{prefix}ban <@user|id> [reason]` • `{prefix}unban <@user|id>`\n"
                 f"`{prefix}bans` • `{prefix}servers`\n"
-                f"`{prefix}admin` • `{prefix}maintenance on|off`"
+                f"`{prefix}admin` • `{prefix}maintenance on|off`\n"
+                f"`{prefix}slots [+1|-1|set N]` • `{prefix}wipe <@user|id> [reason]`"
             ),
             inline=False,
         )
@@ -521,11 +522,108 @@ def maintenance_embed(state: dict, lang: str = DEFAULT_LANG) -> discord.Embed:
     return embed
 
 
+def slots_embed(stats: dict, lang: str = DEFAULT_LANG) -> discord.Embed:
+    """Public capacity card: running / stopped / slots (e.g. 5/5)."""
+    used = int(stats.get("used", 0))
+    total = max(1, int(stats.get("slots", 0)))
+    embed = discord.Embed(
+        title=f"{EMOJI['cloud']} {t(lang, 'slots.title')}",
+        description=(
+            t(
+                lang,
+                "slots.desc",
+                used=used,
+                total=int(stats.get("slots", 0)),
+                free=int(stats.get("free", 0)),
+            )
+            + "\n"
+            + progress_bar(int(used * 100 / total))
+        ),
+        color=COLOR_ERROR if stats.get("full") else COLOR_SUCCESS,
+    )
+    embed.add_field(
+        name=f"{EMOJI['online']} {t(lang, 'slots.running')}",
+        value=f"**{int(stats.get('running', 0))}**",
+        inline=True,
+    )
+    embed.add_field(
+        name=f"{EMOJI['offline']} {t(lang, 'slots.stopped')}",
+        value=f"**{int(stats.get('stopped', 0))}**",
+        inline=True,
+    )
+    embed.add_field(
+        name=f"{EMOJI['spark']} {t(lang, 'slots.free')}",
+        value=f"**{int(stats.get('free', 0))}**",
+        inline=True,
+    )
+    if stats.get("full"):
+        embed.add_field(
+            name=f"{EMOJI['lock']} {t(lang, 'slots.full_title')}",
+            value=t(lang, "slots.full", total=int(stats.get("slots", 0)), prefix=P),
+            inline=False,
+        )
+    return _footer(embed)
+
+
+def slots_changed_embed(
+    old: int, stats: dict, lang: str = DEFAULT_LANG
+) -> discord.Embed:
+    """Confirmation shown after staff raised / lowered the slot limit."""
+    used = int(stats.get("used", 0))
+    new = int(stats.get("slots", 0))
+    embed = discord.Embed(
+        title=f"{EMOJI['gear']} {t(lang, 'slots.changed_title')}",
+        description=t(lang, "slots.changed", old=int(old), new=new, used=used),
+        color=COLOR_SUCCESS,
+    )
+    if used > new:
+        embed.add_field(
+            name=f"{EMOJI['pending']} {t(lang, 'slots.full_title')}",
+            value=t(lang, "slots.below_used", used=used),
+            inline=False,
+        )
+    return _footer(embed)
+
+
+def vps_wiped_embed(
+    user_id: int, stats: dict, lang: str = DEFAULT_LANG
+) -> discord.Embed:
+    """Staff confirmation after deleting somebody else's VPS."""
+    embed = discord.Embed(
+        title=f"{EMOJI['hammer']} {t(lang, 'wipe.title')}",
+        description=t(
+            lang,
+            "wipe.done",
+            user=int(user_id),
+            free=int(stats.get("free", 0)),
+            total=int(stats.get("slots", 0)),
+        ),
+        color=COLOR_SUCCESS,
+    )
+    return _footer(embed)
+
+
+def vps_wiped_notice_embed(reason: str = "", lang: str = DEFAULT_LANG) -> discord.Embed:
+    """DM sent to the owner whose VPS was removed by staff."""
+    embed = discord.Embed(
+        title=f"{EMOJI['cross']} {t(lang, 'wipe.notice_title')}",
+        description=t(
+            lang,
+            "wipe.notice",
+            reason=(reason or "").strip() or t(lang, "wipe.no_reason"),
+            prefix=P,
+        ),
+        color=COLOR_ERROR,
+    )
+    return _footer(embed)
+
+
 def admin_panel_embed(
     state: dict,
     servers: int = 0,
     ban_count: int = 0,
     lang: str = DEFAULT_LANG,
+    stats: dict | None = None,
 ) -> discord.Embed:
     """Staff-only control panel with the maintenance switch."""
     on = bool(state.get("enabled"))
@@ -572,6 +670,32 @@ def admin_panel_embed(
         value=f"**{ban_count}**",
         inline=True,
     )
+    if stats:
+        used = int(stats.get("used", 0))
+        total = int(stats.get("slots", 0))
+        embed.add_field(
+            name=f"{EMOJI['spark']} {t(lang, 'admin.capacity')}",
+            value=(
+                f"**{used}/{total}**"
+                + (f" {EMOJI['lock']}" if stats.get("full") else "")
+            ),
+            inline=True,
+        )
+        embed.add_field(
+            name=f"{EMOJI['online']} {t(lang, 'admin.running')}",
+            value=f"**{int(stats.get('running', 0))}**",
+            inline=True,
+        )
+        embed.add_field(
+            name=f"{EMOJI['offline']} {t(lang, 'admin.stopped')}",
+            value=f"**{int(stats.get('stopped', 0))}**",
+            inline=True,
+        )
+        embed.add_field(
+            name=f"{EMOJI['gear']} {t(lang, 'slots.free')}",
+            value=f"**{int(stats.get('free', 0))}**",
+            inline=True,
+        )
     embed.add_field(
         name=f"{EMOJI['gear']} {t(lang, 'admin.hint')}",
         value=t(lang, "admin.hint_value", prefix=P),

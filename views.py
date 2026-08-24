@@ -26,6 +26,7 @@ from config import (
 from i18n import DEFAULT_LANG, LANGUAGES, LangStore, t
 from maintenance import MAINTENANCE, MaintenanceStore
 from moderation import BanStore
+from slots import MAX_SLOTS, MIN_SLOTS, SLOTS, SlotStore
 from vps_manager import VPSError, VPSManager
 
 log = logging.getLogger("cloudy.views")
@@ -502,6 +503,7 @@ class AdminView(discord.ui.View):
         manager: VPSManager | None = None,
         bans: BanStore | None = None,
         lang: str = DEFAULT_LANG,
+        slots: SlotStore = SLOTS,
     ):
         super().__init__(timeout=600)
         self.owner_id = owner_id
@@ -509,6 +511,8 @@ class AdminView(discord.ui.View):
         self.manager = manager
         self.bans = bans
         self.lang = lang
+        self.slots = slots
+        self.stats: dict = {}
         self.message: discord.Message | None = None
         self.sync_buttons()
 
@@ -523,11 +527,30 @@ class AdminView(discord.ui.View):
         ban_count = self.bans.count if self.bans is not None else 0
         return servers, ban_count
 
+    async def refresh_stats(self) -> dict:
+        """Live running / stopped / slot counters from Docker."""
+        if self.manager is not None:
+            try:
+                self.stats = await self.manager.stats()
+            except Exception as exc:  # pragma: no cover
+                log.warning("could not read VPS stats: %s", exc)
+                self.stats = {}
+        return self.stats
+
     def panel_embed(self) -> discord.Embed:
         servers, ban_count = self._counts()
         return embeds.admin_panel_embed(
-            self.maintenance.state(), servers, ban_count, self.lang
+            self.maintenance.state(),
+            servers,
+            ban_count,
+            self.lang,
+            stats=self.stats or None,
         )
+
+    async def build_embed(self) -> discord.Embed:
+        """Panel embed with fresh counters (use this instead of panel_embed)."""
+        await self.refresh_stats()
+        return self.panel_embed()
 
     def sync_buttons(self) -> None:
         on = self.maintenance.enabled
@@ -544,6 +567,12 @@ class AdminView(discord.ui.View):
                 child.label = t(self.lang, "admin.btn_preview")
             elif child.custom_id == "maint_refresh":
                 child.label = t(self.lang, "admin.btn_refresh")
+            elif child.custom_id == "slot_plus":
+                child.label = t(self.lang, "admin.btn_slot_plus")
+                child.disabled = self.slots.total >= MAX_SLOTS
+            elif child.custom_id == "slot_minus":
+                child.label = t(self.lang, "admin.btn_slot_minus")
+                child.disabled = self.slots.total <= MIN_SLOTS
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id or not is_owner(interaction.user.id):
@@ -578,8 +607,10 @@ class AdminView(discord.ui.View):
         state = await self.maintenance.toggle(
             interaction.user.id, str(interaction.user)
         )
+        await interaction.response.defer()
+        embed = await self.build_embed()
         self.sync_buttons()
-        await interaction.response.edit_message(embed=self.panel_embed(), view=self)
+        await interaction.edit_original_response(embed=embed, view=self)
         await interaction.followup.send(
             embed=embeds.maintenance_toggled_embed(state, self.lang), ephemeral=True
         )
@@ -604,5 +635,44 @@ class AdminView(discord.ui.View):
         custom_id="maint_refresh",
     )
     async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await self.build_embed()
         self.sync_buttons()
-        await interaction.response.edit_message(embed=self.panel_embed(), view=self)
+        await interaction.edit_original_response(embed=embed, view=self)
+
+    # ---- capacity buttons ----
+    async def _change_slots(self, interaction: discord.Interaction, delta: int) -> None:
+        old = self.slots.total
+        await self.slots.add(delta, interaction.user.id, str(interaction.user))
+        await interaction.response.defer()
+        embed = await self.build_embed()
+        self.sync_buttons()
+        await interaction.edit_original_response(embed=embed, view=self)
+        await interaction.followup.send(
+            embed=embeds.slots_changed_embed(old, self.stats, self.lang),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(
+        label="-1 slot",
+        style=discord.ButtonStyle.secondary,
+        emoji="\u2796",
+        custom_id="slot_minus",
+        row=1,
+    )
+    async def slot_minus(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await self._change_slots(interaction, -1)
+
+    @discord.ui.button(
+        label="+1 slot",
+        style=discord.ButtonStyle.success,
+        emoji="\u2795",
+        custom_id="slot_plus",
+        row=1,
+    )
+    async def slot_plus(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await self._change_slots(interaction, +1)
