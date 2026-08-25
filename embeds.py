@@ -522,6 +522,42 @@ def ssh_dm_embed(info: dict, ssh: str, lang: str = DEFAULT_LANG) -> discord.Embe
     return _footer(embed)
 
 
+def sshx_dm_embed(info: dict, link: str, lang: str = DEFAULT_LANG) -> discord.Embed:
+    """Browser-terminal link (sshx). The link IS the key, so DM only."""
+    embed = discord.Embed(
+        title=f"{EMOJI['web']} {t(lang, 'sshx.dm_title')}",
+        description=t(
+            lang,
+            "sshx.dm_desc",
+            name=info.get("name", "-"),
+            sid=info.get("short_id", "-"),
+        ),
+        color=COLOR_SUCCESS,
+    )
+    embed.add_field(
+        name=f"{EMOJI['link']} {t(lang, 'sshx.link')}",
+        value=link,
+        inline=False,
+    )
+    embed.add_field(
+        name=f"{EMOJI['os']} {t(lang, 'ssh.system')}",
+        value=f"{info.get('os', '-')} \u2022 {info.get('ram_limit_mb', '-')} MB RAM \u2022 "
+        f"{info.get('cpu_limit', 0):g} vCPU \u2022 {info.get('disk_gb', '-')} GB",
+        inline=False,
+    )
+    embed.add_field(
+        name=f"{EMOJI['spark']} {t(lang, 'sshx.how')}",
+        value=t(lang, "sshx.how_value"),
+        inline=False,
+    )
+    embed.add_field(
+        name=f"{EMOJI['lock']} {t(lang, 'sshx.keep_private')}",
+        value=t(lang, "sshx.keep_private_value", prefix=P),
+        inline=False,
+    )
+    return _footer(embed)
+
+
 def dm_failed_embed(lang: str = DEFAULT_LANG) -> discord.Embed:
     return _footer(
         discord.Embed(
@@ -633,7 +669,12 @@ def manage_embed(info: dict, lang: str = DEFAULT_LANG) -> discord.Embed:
     embed.add_field(
         name=f"{EMOJI['key']} {t(lang, 'success.ssh_field')}",
         value=(
-            t(lang, "manage.ssh_running") if running else t(lang, "manage.ssh_stopped")
+            t(lang, "manage.ssh_running")
+            + "\n"
+            + f"{EMOJI['web']} "
+            + t(lang, "manage.web_hint", prefix=P)
+            if running
+            else t(lang, "manage.ssh_stopped")
         ),
         inline=False,
     )
@@ -851,6 +892,11 @@ def help_embed(
     )
     embed.add_field(name=f"`{prefix}deploy`", value=t(lang, "help.deploy"), inline=False)
     embed.add_field(name=f"`{prefix}manage`", value=t(lang, "help.manage"), inline=False)
+    embed.add_field(
+        name=f"`{prefix}sshx` \u2022 `{prefix}\u0432\u0435\u0431`",
+        value=t(lang, "help.sshx"),
+        inline=False,
+    )
     embed.add_field(
         name=f"`{prefix}rules`",
         value=t(lang, "help.rules", count=len(rules_for(lang))),

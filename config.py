@@ -124,6 +124,8 @@ EMOJI = {
     "wallet": "\U0001F45B",
     "user": "\U0001F464",
     "id": "\U0001F194",
+    "link": "\U0001F517",
+    "web": "\U0001F310",
 }
 
 # ---------------------------------------------------------------------------
@@ -141,7 +143,7 @@ PLAN = {
     "disk_gb": int(os.getenv("VPS_DISK_GB", "20")),
     "bandwidth": os.getenv("VPS_BANDWIDTH", "Unmetered (fair use)"),
     "location": os.getenv("VPS_LOCATION", "EU • Docker Host"),
-    "access": "tmate SSH",
+    "access": "tmate SSH • sshx web",
 }
 
 # ---------------------------------------------------------------------------
@@ -197,4 +199,23 @@ TMATE_RSA_FINGERPRINT = os.getenv("TMATE_RSA_FINGERPRINT", "").strip()
 TMATE_ED25519_FINGERPRINT = os.getenv("TMATE_ED25519_FINGERPRINT", "").strip()
 
 # Deployment animation speed (seconds per frame)
+# ---------------------------------------------------------------------------
+# sshx - browser terminal (second access method)
+# ---------------------------------------------------------------------------
+# sshx gives every VPS a link like https://sshx.io/s/<id>#<key>. The part after
+# "#" is the encryption key: it stays in the browser and never reaches the
+# server, so the link itself is the credential (we only DM it).
+# Handy when the host blocks outbound SSH: sshx only needs plain HTTPS.
+SSHX_ENABLED = os.getenv("SSHX_ENABLED", "1").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+    "off",
+)
+SSHX_TIMEOUT = int(os.getenv("SSHX_TIMEOUT", "90"))
+SSHX_INSTALL_URL = os.getenv("SSHX_INSTALL_URL", "https://sshx.io/get")
+SSHX_BINARY_BASE = os.getenv("SSHX_BINARY_BASE", "https://sshx.s3.amazonaws.com")
+# Optional self-hosted sshx server (empty = the public mesh).
+SSHX_SERVER = os.getenv("SSHX_SERVER", "").strip()
+
 ANIM_DELAY = float(os.getenv("ANIM_DELAY", "0.9"))

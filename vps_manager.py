@@ -12,6 +12,7 @@ import base64
 import json
 import logging
 import os
+import re
 import time
 import uuid
 
@@ -26,6 +27,11 @@ from config import (
     CONTAINER_PREFIX,
     MAX_VPS_PER_USER,
     PLAN,
+    SSHX_BINARY_BASE,
+    SSHX_ENABLED,
+    SSHX_INSTALL_URL,
+    SSHX_SERVER,
+    SSHX_TIMEOUT,
     STATE_FILE,
     TMATE_ED25519_FINGERPRINT,
     TMATE_PORTS,
@@ -83,6 +89,13 @@ exec bash -l
 TMATE_SOCK = "/tmp/cloudy.tmate.sock"
 TMATE_LOG = "/tmp/cloudy.tmate.log"
 TMATE_CONF = "/root/.tmate.conf"
+
+# sshx: browser terminal. The client is a single static binary; it prints one
+# line like "https://sshx.io/s/wC8cc6Mbjv#W0apHWrt8OaX4W" and keeps running.
+SSHX_BIN = "/usr/local/bin/sshx"
+SSHX_LOG = "/tmp/cloudy.sshx.log"
+SSHX_URL_RE = re.compile(r"https?://[^\s\"']+/s/[A-Za-z0-9_-]+#[A-Za-z0-9_-]+")
+ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 # Static tmate build used when the distro package is unavailable.
 _GH = "https://" + "github.com/tmate-io/tmate/releases/download"
@@ -726,6 +739,163 @@ class VPSManager:
             )
         body = "\\n".join(lines)
         self._exec(container, f"printf '{body}\\n' > {TMATE_CONF}")
+
+    # ------------------------------------------------------------------
+    # sshx: browser terminal (second access method, no SSH client needed)
+    # ------------------------------------------------------------------
+    def _ensure_sshx_binary(self, container, lang: str = "en") -> None:
+        """Make sure the sshx client exists in the guest (installs it once)."""
+        code, _, _ = self._exec(
+            container, f"command -v sshx >/dev/null 2>&1 || test -x {SSHX_BIN}"
+        )
+        if code == 0:
+            return
+
+        log.info("sshx missing in %s, installing at runtime", container.short_id)
+        install = (
+            "set -u; mkdir -p /usr/local/bin; "
+            'arch="$(uname -m)"; '
+            'case "$arch" in '
+            "x86_64|amd64) target=x86_64-unknown-linux-musl ;; "
+            "aarch64|arm64) target=aarch64-unknown-linux-musl ;; "
+            "armv7*) target=armv7-unknown-linux-musleabihf ;; "
+            "armv6*|armv5*) target=arm-unknown-linux-musleabihf ;; "
+            '*) target="" ;; '
+            "esac; "
+            # 1) official statically linked build, straight from the bucket
+            'if [ -n "$target" ]; then '
+            f'url="{SSHX_BINARY_BASE}/sshx-$target.tar.gz"; '
+            '(curl -fsSL "$url" -o /tmp/sshx.tgz || wget -qO /tmp/sshx.tgz "$url") '
+            ">/dev/null 2>&1 && tar -xzf /tmp/sshx.tgz -C /usr/local/bin sshx "
+            ">/dev/null 2>&1; fi; "
+            # 2) fall back to the official installer script
+            "if [ ! -x /usr/local/bin/sshx ] && ! command -v sshx >/dev/null 2>&1; then "
+            f"(curl -sSf {SSHX_INSTALL_URL} | sh) >/dev/null 2>&1 || true; fi; "
+            # 3) whatever it dropped somewhere else, put it on PATH
+            'for p in /usr/bin/sshx "$HOME/.local/bin/sshx" ./sshx /root/sshx; do '
+            '[ -x "$p" ] && [ ! -x /usr/local/bin/sshx ] && cp "$p" /usr/local/bin/sshx; '
+            "done; "
+            "chmod 755 /usr/local/bin/sshx 2>/dev/null; rm -f /tmp/sshx.tgz; "
+            "command -v sshx >/dev/null 2>&1 || test -x /usr/local/bin/sshx"
+        )
+        code, out, err = self._exec(container, install)
+        if code != 0:
+            log.warning(
+                "sshx install failed in %s: %s | %s", container.short_id, out, err
+            )
+            raise VPSError(t(lang, "sshx.install_failed"))
+
+    def _sshx_link(self, container) -> str:
+        """Last https://.../s/<id>#<key> link printed by sshx in the guest."""
+        code, out, _ = self._exec(container, f"cat {SSHX_LOG} 2>/dev/null")
+        if code != 0 or not out:
+            return ""
+        clean = ANSI_RE.sub("", out.replace("\r", "\n"))
+        links = SSHX_URL_RE.findall(clean)
+        return links[-1] if links else ""
+
+    def _sshx_alive(self, container) -> bool:
+        code, _, _ = self._exec(
+            container, "pgrep -f '[s]shx' >/dev/null 2>&1 && echo yes"
+        )
+        return code == 0
+
+    def _kill_sshx(self, container, wipe_log: bool = True) -> None:
+        script = "pkill -f '[s]shx' >/dev/null 2>&1; sleep 0.4; "
+        if wipe_log:
+            script += f": > {SSHX_LOG} 2>/dev/null; "
+        self._exec(container, script + "exit 0")
+
+    def _start_sshx(self, container, budget: float) -> tuple[str, str]:
+        """Start sshx detached and wait for its link. Returns (link, log tail).
+
+        Flag support differs between client versions, so the variants degrade
+        from "pretty" to "bare" instead of failing outright.
+        """
+        self._kill_sshx(container)
+        server = f" --server {SSHX_SERVER}" if SSHX_SERVER else ""
+        variants = [
+            # cloudy-login shows the Cloudy banner in the browser terminal
+            f"sshx{server} --quiet --shell {LOGIN_PATH}",
+            f"sshx{server} --quiet",
+            f"sshx{server}",
+        ]
+        per_try = max(10.0, budget / len(variants))
+        tail = ""
+        for command in variants:
+            self._exec(
+                container,
+                "set -u; export TERM=xterm-256color; cd /root 2>/dev/null; "
+                f": > {SSHX_LOG}; "
+                f"setsid nohup {command} >> {SSHX_LOG} 2>&1 < /dev/null & "
+                "sleep 1; exit 0",
+            )
+
+            deadline = time.time() + per_try
+            while time.time() < deadline:
+                link = self._sshx_link(container)
+                if link:
+                    log.info("sshx up in %s (%s)", container.short_id, command)
+                    return link, ""
+                _, tail, _ = self._exec(
+                    container, f"tail -n 6 {SSHX_LOG} 2>/dev/null"
+                )
+                if not self._sshx_alive(container):
+                    break  # client exited (unknown flag / no network) -> next
+                time.sleep(1.0)
+
+            self._kill_sshx(container, wipe_log=False)
+        return "", tail
+
+    def _sshx_sync(
+        self, user_id: int, force_new: bool = False, lang: str = "en"
+    ) -> str:
+        if not SSHX_ENABLED:
+            raise VPSError(t(lang, "sshx.disabled"))
+
+        container = self._container(user_id)
+        record = self.get_record(user_id)
+        if container is None or record is None:
+            raise VPSError(t(lang, "sshx.no_vps", prefix=COMMAND_PREFIX))
+
+        container.reload()
+        if container.status != "running":
+            raise VPSError(t(lang, "sshx.not_running", prefix=COMMAND_PREFIX))
+
+        # Re-use a live session unless the user explicitly asked for a new link.
+        if record.get("sshx") and not force_new and self._sshx_alive(container):
+            link = self._sshx_link(container)
+            if link:
+                if link != record.get("sshx"):
+                    record["sshx"] = link
+                    self._save_state()
+                return link
+
+        self._ensure_sshx_binary(container, lang)
+
+        # Same banner refresh as for tmate, so the web terminal greets nicely.
+        try:
+            self._install_banner(container)
+        except Exception as exc:  # pragma: no cover
+            log.warning("could not refresh banner before sshx: %s", exc)
+
+        link, tail = self._start_sshx(container, max(20.0, float(SSHX_TIMEOUT - 10)))
+        if not link:
+            raise VPSError(t(lang, "sshx.no_link", tail=(tail or "-")[-400:]))
+
+        record["sshx"] = link
+        record["sshx_ts"] = time.time()
+        self._save_state()
+        return link
+
+    async def get_sshx(
+        self, user_id: int, force_new: bool = False, lang: str = "en"
+    ) -> str:
+        """Browser-terminal link for this user's VPS."""
+        return await asyncio.wait_for(
+            asyncio.to_thread(self._sshx_sync, user_id, force_new, lang),
+            timeout=SSHX_TIMEOUT + 30,
+        )
 
     def _kill_session(self, container) -> None:
         """Stop a previous tmate server without killing our own shell.

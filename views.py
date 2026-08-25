@@ -73,6 +73,31 @@ async def deliver_ssh(
     return False
 
 
+async def deliver_sshx(
+    user: discord.abc.User,
+    info: dict,
+    link: str,
+    interaction: discord.Interaction | None = None,
+    lang: str = DEFAULT_LANG,
+) -> bool:
+    """Send the sshx link privately. Returns True if the DM was delivered."""
+    embed = embeds.sshx_dm_embed(info, link, lang)
+    try:
+        await user.send(embed=embed)
+        return True
+    except (discord.Forbidden, discord.HTTPException) as exc:
+        log.warning("DM to %s failed: %s", user.id, exc)
+
+    if interaction is not None:
+        target = interaction.followup if interaction.response.is_done() else interaction.response
+        try:
+            await target.send(embed=embeds.dm_failed_embed(lang), ephemeral=True)
+            await target.send(embed=embed, ephemeral=True)
+        except discord.HTTPException:
+            pass
+    return False
+
+
 class OwnerOnlyView(discord.ui.View):
     """Base view that only reacts to the user who ran the command."""
 
@@ -280,6 +305,7 @@ class ManageView(OwnerOnlyView):
         "vps_stop": "btn.stop",
         "vps_restart": "btn.restart",
         "vps_ssh": "btn.ssh",
+        "vps_sshx": "btn.sshx",
         "vps_refresh": "btn.refresh",
         "vps_rules": "btn.rules",
     }
@@ -300,7 +326,12 @@ class ManageView(OwnerOnlyView):
                 continue
             if child.custom_id == "vps_start":
                 child.disabled = running
-            elif child.custom_id in ("vps_stop", "vps_restart", "vps_ssh"):
+            elif child.custom_id in (
+                "vps_stop",
+                "vps_restart",
+                "vps_ssh",
+                "vps_sshx",
+            ):
                 child.disabled = not running
             else:
                 child.disabled = False
@@ -394,6 +425,45 @@ class ManageView(OwnerOnlyView):
                 embed=embeds.info_embed(
                     f"{EMOJI['mail']} {t(lang, 'ssh.check_dms_title')}",
                     t(lang, "ssh.check_dms_desc"),
+                    COLOR_PRIMARY,
+                ),
+                ephemeral=True,
+            )
+
+    @discord.ui.button(
+        label="Web terminal",
+        style=discord.ButtonStyle.primary,
+        emoji="\U0001F310",
+        custom_id="vps_sshx",
+        row=1,
+    )
+    async def sshx(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Second access method: a browser terminal link from sshx.io."""
+        lang = self.lang
+        await interaction.response.defer(ephemeral=True)
+        try:
+            link = await self.manager.get_sshx(
+                interaction.user.id, force_new=True, lang=lang
+            )
+        except asyncio.TimeoutError:
+            await interaction.followup.send(
+                embed=embeds.error_embed(t(lang, "sshx.timeout"), lang=lang),
+                ephemeral=True,
+            )
+            return
+        except VPSError as exc:
+            await interaction.followup.send(
+                embed=embeds.error_embed(str(exc), lang=lang), ephemeral=True
+            )
+            return
+
+        info = await self.manager.get_info(interaction.user.id)
+        sent = await deliver_sshx(interaction.user, info, link, interaction, lang)
+        if sent:
+            await interaction.followup.send(
+                embed=embeds.info_embed(
+                    f"{EMOJI['mail']} {t(lang, 'sshx.check_dms_title')}",
+                    t(lang, "sshx.check_dms_desc"),
                     COLOR_PRIMARY,
                 ),
                 ephemeral=True,

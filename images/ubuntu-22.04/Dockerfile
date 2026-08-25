@@ -60,6 +60,25 @@ RUN set -eux; \
     chmod +x /usr/local/bin/tmate; \
     rm -rf /tmp/tmate*
 
+# ---- sshx (browser terminal, second access method) ----
+# Official statically linked musl build. The bot can also install it at
+# runtime, so containers made from older images keep working.
+RUN set -eux; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+        x86_64|amd64) target="x86_64-unknown-linux-musl" ;; \
+        aarch64|arm64) target="aarch64-unknown-linux-musl" ;; \
+        armv7*) target="armv7-unknown-linux-musleabihf" ;; \
+        *) target="" ;; \
+    esac; \
+    if [ -n "$target" ]; then \
+        wget -qO /tmp/sshx.tar.gz "https://sshx.s3.amazonaws.com/sshx-${target}.tar.gz" \
+        && tar -xzf /tmp/sshx.tar.gz -C /usr/local/bin sshx \
+        && chmod 755 /usr/local/bin/sshx \
+        && rm -f /tmp/sshx.tar.gz; \
+    fi; \
+    /usr/local/bin/sshx --version || true
+
 # ---- Cosmetics: pretty login banner (ASCII art + live system info) ----
 # The banner is a real script (no fragile printf escaping) and is bilingual:
 # CLOUDY_LANG=ru switches every label to Russian.

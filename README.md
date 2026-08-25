@@ -21,6 +21,7 @@ and a button-based control panel.
 | `!ban <@user\|id> [reason]` | **Staff.** Blocks the user, stops their server, DMs them the reason. |
 | `!unban <@user\|id>` | **Staff.** Restores access and DMs the user. |
 | `!bans` | **Staff.** List of all bans with reason and moderator. |
+| `!sshx` • `!веб` | Browser terminal link (sshx.io) — the second way into the same VPS. |
 | `!servers` | **Staff.** All deployed servers and their owners. |
 | `!plan` | **Staff.** Show the free-tier resources; `!plan ram 4096`, `!plan disk 30`, `!plan cpu 2`, `!plan reset` change them live. |
 | `!ping` | Latency check. |
@@ -227,6 +228,35 @@ git push -f origin main
 > GitHub also offers an "allow secret" link in the rejection message. Do **not**
 > use it — it lets the raw token into the repository, and Discord auto-revokes
 > tokens it finds on public GitHub.
+
+---
+
+## Two ways to connect
+
+| | tmate SSH | sshx web terminal |
+|---|---|---|
+| Command | button `Get SSH` in `!manage` | `!sshx` or the `Web terminal` button |
+| Client | any `ssh` client | any browser |
+| Needs | outbound TCP 2200 / 22 / 443 | plain HTTPS only |
+| Looks like | `ssh nXZ...@nyc1.tmate.io` | `https://sshx.io/s/wC8cc6Mbjv#W0apHWrt8OaX4W` |
+
+Both open the same container as `root`, and both are sent **by DM only**.
+
+### sshx (browser terminal)
+
+* The client is one static binary; the bot installs it inside the VPS on first
+  use (official build from `sshx.s3.amazonaws.com`, with `https://sshx.io/get`
+  as a fallback) and pre-installs it in the guest image.
+* It runs detached with `--shell /usr/local/bin/cloudy-login`, so the browser
+  terminal greets you with the same Cloudy banner as SSH. If a client build does
+  not know a flag, the bot retries with fewer flags instead of failing.
+* Everything after `#` in the link is the encryption key: it stays in the URL
+  fragment, so the sshx server never sees it. **The link is the credential** -
+  the bot only ever DMs it.
+* `!sshx` always kills the previous session and prints a fresh link, so a leaked
+  link can be revoked in one command. Stopping the VPS kills the session too.
+* Settings: `SSHX_ENABLED`, `SSHX_TIMEOUT`, `SSHX_SERVER` (self-hosted mesh),
+  `SSHX_INSTALL_URL`, `SSHX_BINARY_BASE`.
 
 ---
 

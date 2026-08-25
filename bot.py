@@ -5,6 +5,7 @@ Version 1.2 Beta (bilingual RU / EN, leaf economy)
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 
@@ -15,6 +16,7 @@ import embeds
 from config import (
     BOT_NAME,
     BOT_VERSION,
+    COLOR_PRIMARY,
     COMMAND_PREFIX,
     DISCORD_TOKEN,
     EMOJI,
@@ -28,7 +30,14 @@ from maintenance import MAINTENANCE
 from moderation import BanStore, ModerationError
 from plan_store import PLAN_STORE
 from slots import MAX_SLOTS, MIN_SLOTS, SLOTS
-from views import AdminView, DeployView, LanguageView, ManageView, ProfileView
+from views import (
+    AdminView,
+    DeployView,
+    LanguageView,
+    ManageView,
+    ProfileView,
+    deliver_sshx,
+)
 from vps_manager import VPSError, VPSManager
 from wallet import MAX_GRANT, WALLET
 
@@ -366,6 +375,44 @@ async def manage(ctx: commands.Context) -> None:
         embed=embeds.manage_embed(info, lang), view=view, mention_author=False
     )
     view.message = msg
+
+
+@bot.command(
+    name="sshx",
+    aliases=["web", "browser", "\u0432\u0435\u0431", "\u0442\u0435\u0440\u043c\u0438\u043d\u0430\u043b"],
+)
+async def sshx_cmd(ctx: commands.Context) -> None:
+    """Second access method: browser terminal link (sshx.io), DM only."""
+    lang = lang_of(ctx.author)
+    try:
+        mgr = _require_manager()
+        async with ctx.typing():
+            link = await mgr.get_sshx(ctx.author.id, force_new=True, lang=lang)
+            info = await mgr.get_info(ctx.author.id)
+    except asyncio.TimeoutError:
+        await ctx.reply(
+            embed=embeds.error_embed(t(lang, "sshx.timeout"), lang=lang),
+            mention_author=False,
+        )
+        return
+    except VPSError as exc:
+        await ctx.reply(
+            embed=embeds.error_embed(str(exc), lang=lang), mention_author=False
+        )
+        return
+
+    sent = await deliver_sshx(ctx.author, info, link, None, lang)
+    if sent:
+        await ctx.reply(
+            embed=embeds.info_embed(
+                f"{EMOJI['mail']} {t(lang, 'sshx.check_dms_title')}",
+                t(lang, "sshx.check_dms_desc"),
+                COLOR_PRIMARY,
+            ),
+            mention_author=False,
+        )
+    else:
+        await ctx.reply(embed=embeds.dm_failed_embed(lang), mention_author=False)
 
 
 @bot.command(name="rules")
