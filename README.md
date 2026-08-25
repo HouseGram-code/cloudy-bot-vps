@@ -552,6 +552,30 @@ The admin panel (`!admin`) has the same controls as buttons:
 
 ---
 
+## Updating safely (self check)
+
+When you copy a new build over an old folder, copy **every** file - the modules
+read new settings from `config.py`. Copying only some of them produced crashes
+like:
+
+```
+ImportError: cannot import name 'PLAN_FILE' from 'config'
+```
+
+Run the pre-flight check after every update:
+
+```bash
+python3 tools/selfcheck.py            # on the host, in the project folder
+docker compose exec bot python tools/selfcheck.py   # inside the container
+```
+
+It reports missing files, settings that `config.py` does not know about,
+incomplete translations and modules that fail to import - before the bot starts
+restart-looping. `plan_store.py` and `wallet.py` now also fall back to `.env`
+values and safe defaults, so an old `config.py` can no longer stop the bot.
+
+---
+
 ## Other fixes in this build
 
 * `!manage` was redesigned: RAM / CPU / disk / network now live in one aligned

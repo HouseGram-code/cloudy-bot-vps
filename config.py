@@ -133,10 +133,12 @@ PLAN = {
     "name": "Free Tier",
     "os": "Ubuntu 22.04 LTS (Jammy Jellyfish)",
     "os_short": "ubuntu-22.04",
-    "ram_mb": int(os.getenv("VPS_RAM_MB", "1024")),
-    "swap_mb": int(os.getenv("VPS_SWAP_MB", "512")),
-    "cpu_cores": float(os.getenv("VPS_CPU_CORES", "1")),
-    "disk_gb": int(os.getenv("VPS_DISK_GB", "10")),
+    # Defaults of the free tier. Staff can change them at runtime with
+    # `!plan` or the buttons in `!admin` (see plan_store.py).
+    "ram_mb": int(os.getenv("VPS_RAM_MB", "2048")),
+    "swap_mb": int(os.getenv("VPS_SWAP_MB", "1024")),
+    "cpu_cores": float(os.getenv("VPS_CPU_CORES", "2")),
+    "disk_gb": int(os.getenv("VPS_DISK_GB", "20")),
     "bandwidth": os.getenv("VPS_BANDWIDTH", "Unmetered (fair use)"),
     "location": os.getenv("VPS_LOCATION", "EU • Docker Host"),
     "access": "tmate SSH",
@@ -154,6 +156,9 @@ TOTAL_VPS_SLOTS = int(os.getenv("TOTAL_VPS_SLOTS", "5"))
 STATE_FILE = os.getenv("STATE_FILE", "/app/data/vps_state.json")
 BAN_FILE = os.getenv("BAN_FILE", "/app/data/bans.json")
 SLOTS_FILE = os.getenv("SLOTS_FILE", "/app/data/slots.json")
+# Live resource plan (RAM / swap / vCPU / disk) edited from `!admin` or
+# `!plan`. Deleting the file resets the plan to the values above.
+PLAN_FILE = os.getenv("PLAN_FILE", "/app/data/plan.json")
 
 # ---------------------------------------------------------------------------
 # Leaf economy ("listiki")

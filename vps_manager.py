@@ -19,6 +19,7 @@ import docker
 from docker.errors import APIError, ImageNotFound, NotFound
 
 from i18n import t
+from plan_store import PLAN_STORE
 from slots import SLOTS
 from config import (
     COMMAND_PREFIX,
@@ -268,8 +269,10 @@ class VPSManager:
         self._ensure_image_sync()
 
         name = f"{CONTAINER_PREFIX}-{user_id}-{uuid.uuid4().hex[:6]}"
-        mem_limit = f"{PLAN['ram_mb']}m"
-        memswap = f"{PLAN['ram_mb'] + PLAN['swap_mb']}m"
+        # Live plan: staff may have raised RAM / disk / vCPU since start-up.
+        plan = PLAN_STORE.plan()
+        mem_limit = f"{plan['ram_mb']}m"
+        memswap = f"{plan['ram_mb'] + plan['swap_mb']}m"
 
         kwargs = dict(
             image=VPS_IMAGE,
@@ -280,7 +283,7 @@ class VPSManager:
             stdin_open=True,
             mem_limit=mem_limit,
             memswap_limit=memswap,
-            nano_cpus=int(PLAN["cpu_cores"] * 1_000_000_000),
+            nano_cpus=int(plan["cpu_cores"] * 1_000_000_000),
             pids_limit=512,
             restart_policy={"Name": "unless-stopped"},
             # tmate needs a working resolver for ssh.tmate.io.
@@ -292,17 +295,17 @@ class VPSManager:
                 "LANG": "C.UTF-8",
                 "CLOUDY_LANG": "ru" if str(lang).startswith("ru") else "en",
                 # The banner shows the plan limits, not the host metrics.
-                "CLOUDY_RAM_MB": str(PLAN["ram_mb"]),
-                "CLOUDY_DISK_GB": str(PLAN["disk_gb"]),
-                "CLOUDY_CPU": str(PLAN["cpu_cores"]),
+                "CLOUDY_RAM_MB": str(plan["ram_mb"]),
+                "CLOUDY_DISK_GB": str(plan["disk_gb"]),
+                "CLOUDY_CPU": str(plan["cpu_cores"]),
             },
             labels={
                 "cloudy.vps": "true",
                 "cloudy.owner": str(user_id),
                 "cloudy.owner_name": username,
-                "cloudy.os": PLAN["os_short"],
+                "cloudy.os": plan["os_short"],
             },
-            storage_opt={"size": f"{PLAN['disk_gb']}G"},
+            storage_opt={"size": f"{plan['disk_gb']}G"},
         )
 
         try:
@@ -324,11 +327,11 @@ class VPSManager:
             "name": name,
             "owner_id": user_id,
             "owner_name": username,
-            "os": PLAN["os"],
-            "ram_mb": PLAN["ram_mb"],
-            "cpu_cores": PLAN["cpu_cores"],
-            "disk_gb": PLAN["disk_gb"],
-            "bandwidth": PLAN["bandwidth"],
+            "os": plan["os"],
+            "ram_mb": plan["ram_mb"],
+            "cpu_cores": plan["cpu_cores"],
+            "disk_gb": plan["disk_gb"],
+            "bandwidth": plan["bandwidth"],
             "created_ts": time.time(),
             "ssh": None,
         }
@@ -363,6 +366,20 @@ class VPSManager:
             pass
         return "ru" if str(fallback).startswith("ru") else "en"
 
+    @staticmethod
+    def _guest_env(container) -> dict:
+        """Environment of a guest container (its own CLOUDY_* limits)."""
+        env = {}
+        try:
+            raw = container.attrs.get("Config", {}).get("Env") or []
+        except Exception:  # pragma: no cover - container may be gone
+            return env
+        for item in raw:
+            if "=" in str(item):
+                key, _, value = str(item).partition("=")
+                env[key] = value
+        return env
+
     def _install_banner(self, container, lang: str | None = None) -> None:
         """Push the pretty login banner into the guest and kill the old MOTD.
 
@@ -389,11 +406,15 @@ class VPSManager:
         def b64(text: str) -> str:
             return base64.b64encode(text.encode("utf-8")).decode("ascii")
 
+        # A guest keeps the limits it was created with, so prefer the
+        # container's own CLOUDY_* variables and fall back to the live plan.
+        live = PLAN_STORE.plan()
+        env = self._guest_env(container)
         fields = {
             "lang": guest_lang,
-            "ram": PLAN["ram_mb"],
-            "disk": PLAN["disk_gb"],
-            "cpu": PLAN["cpu_cores"],
+            "ram": env.get("CLOUDY_RAM_MB") or live["ram_mb"],
+            "disk": env.get("CLOUDY_DISK_GB") or live["disk_gb"],
+            "cpu": env.get("CLOUDY_CPU") or live["cpu_cores"],
         }
         hook_b64 = b64(BANNER_HOOK % fields)
         login_b64 = b64(LOGIN_WRAPPER % fields)

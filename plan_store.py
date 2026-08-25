@@ -17,7 +17,15 @@ import json
 import os
 import time
 
-from config import PLAN, PLAN_FILE
+import config
+
+PLAN = config.PLAN
+# A half-updated deployment (new modules + an old config.py) used to crash
+# with `ImportError: cannot import name 'PLAN_FILE'`. Never hard-fail on a
+# missing setting - fall back to the environment and then to the default.
+PLAN_FILE = getattr(config, "PLAN_FILE", None) or os.getenv(
+    "PLAN_FILE", "/app/data/plan.json"
+)
 
 # Safety rails: the host cannot hand out more than it has.
 MIN_RAM_MB = 256

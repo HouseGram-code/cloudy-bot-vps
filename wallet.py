@@ -21,13 +21,26 @@ import json
 import os
 import time
 
-from config import (
-    BONUS_COOLDOWN_HOURS,
-    BONUS_LEAVES,
-    LEAF_COST_PER_HOUR,
-    START_LEAVES,
-    WALLET_FILE,
-)
+import config
+
+
+def _setting(name, default):
+    """Read a setting from config, then the environment, then the default.
+
+    Older config.py files do not know about the leaf economy; importing the
+    names directly made the whole bot refuse to start on a partial update.
+    """
+    value = getattr(config, name, None)
+    if value is None:
+        value = os.getenv(name, default)
+    return value
+
+
+START_LEAVES = int(_setting("START_LEAVES", 3))
+LEAF_COST_PER_HOUR = int(_setting("LEAF_COST_PER_HOUR", 1))
+BONUS_LEAVES = int(_setting("BONUS_LEAVES", 25))
+BONUS_COOLDOWN_HOURS = float(_setting("BONUS_COOLDOWN_HOURS", 24))
+WALLET_FILE = str(_setting("WALLET_FILE", "/app/data/wallet.json"))
 
 # Hard limits so a typo in the admin panel cannot break the economy.
 MAX_LEAVES = 1_000_000
