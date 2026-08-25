@@ -252,10 +252,17 @@ class VPSManager:
         if MAX_VPS_PER_USER and not is_owner(user_id):
             used = len(self._owned_containers(user_id))
             if used >= int(MAX_VPS_PER_USER):
+                # Localized (the old message was English-only and hardcoded
+                # the "!" prefix).
                 raise VPSError(
-                    f"**VPS limit reached.** Your account can run "
-                    f"`{int(MAX_VPS_PER_USER)}` VPS and you already have `{used}`.\n"
-                    "Use `!manage` to control it, or `!destroy` to delete it first."
+                    f"**{t(lang, 'vps.limit_title')}**\n"
+                    + t(
+                        lang,
+                        "vps.limit",
+                        limit=int(MAX_VPS_PER_USER),
+                        used=used,
+                        prefix=COMMAND_PREFIX,
+                    )
                 )
 
         self._ensure_image_sync()

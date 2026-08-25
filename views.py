@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 
 import discord
 
@@ -26,8 +27,19 @@ from config import (
 from i18n import DEFAULT_LANG, LANGUAGES, LangStore, t
 from maintenance import MAINTENANCE, MaintenanceStore
 from moderation import BanStore
+from plan_store import (
+    DISK_STEP,
+    MAX_DISK_GB,
+    MAX_RAM_MB,
+    MIN_DISK_GB,
+    MIN_RAM_MB,
+    PLAN_STORE,
+    RAM_STEP,
+    PlanStore,
+)
 from slots import MAX_SLOTS, MIN_SLOTS, SLOTS, SlotStore
 from vps_manager import VPSError, VPSManager
+from wallet import MAX_GRANT, WALLET, Wallet
 
 log = logging.getLogger("cloudy.views")
 
@@ -493,6 +505,188 @@ class LanguageView(discord.ui.View):
 # ---------------------------------------------------------------------------
 # !admin - staff panel with the maintenance switch
 # ---------------------------------------------------------------------------
+class ProfileView(discord.ui.View):
+    """Profile card with the daily bonus button (owner of the profile only)."""
+
+    def __init__(
+        self,
+        user: discord.abc.User,
+        manager: VPSManager | None = None,
+        wallet: Wallet = WALLET,
+        lang: str = DEFAULT_LANG,
+    ):
+        super().__init__(timeout=300)
+        self.profile_user = user
+        self.owner_id = user.id
+        self.manager = manager
+        self.wallet = wallet
+        self.lang = lang
+        self.message: discord.Message | None = None
+        self.sync_buttons()
+
+    # ---- helpers ----
+    async def _vps_info(self) -> dict | None:
+        if self.manager is None:
+            return None
+        try:
+            if await self.manager.has_vps(self.owner_id):
+                return await self.manager.get_info(self.owner_id)
+        except Exception as exc:  # pragma: no cover
+            log.warning("profile: could not read VPS info: %s", exc)
+        return None
+
+    async def build_embed(self) -> discord.Embed:
+        state = self.wallet.state(self.owner_id, str(self.profile_user))
+        state["bonus_at"] = self.wallet.bonus_at(self.owner_id)
+        return embeds.profile_embed(
+            self.profile_user, state, await self._vps_info(), self.lang
+        )
+
+    def sync_buttons(self) -> None:
+        ready = self.wallet.bonus_ready(self.owner_id)
+        for child in self.children:
+            if not isinstance(child, discord.ui.Button):
+                continue
+            if child.custom_id == "profile_bonus":
+                child.label = t(self.lang, "btn.bonus" if ready else "btn.bonus_wait")
+                child.disabled = not ready
+                child.style = (
+                    discord.ButtonStyle.success if ready else discord.ButtonStyle.secondary
+                )
+            elif child.custom_id == "profile_refresh":
+                child.label = t(self.lang, "btn.profile_refresh")
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                embed=embeds.error_embed(
+                    t(self.lang, "panel.not_yours", prefix=COMMAND_PREFIX),
+                    title=t(self.lang, "panel.not_yours_title"),
+                    lang=self.lang,
+                ),
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    async def on_timeout(self) -> None:
+        for child in self.children:
+            child.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+    # ---- buttons ----
+    @discord.ui.button(
+        label="Daily bonus",
+        style=discord.ButtonStyle.success,
+        emoji="\U0001F381",
+        custom_id="profile_bonus",
+    )
+    async def bonus(self, interaction: discord.Interaction, button: discord.ui.Button):
+        result = await self.wallet.claim_bonus(
+            interaction.user.id, str(interaction.user)
+        )
+        await interaction.response.defer()
+        embed = await self.build_embed()
+        self.sync_buttons()
+        await interaction.edit_original_response(embed=embed, view=self)
+        await interaction.followup.send(
+            embed=embeds.bonus_claimed_embed(result, self.lang), ephemeral=True
+        )
+
+    @discord.ui.button(
+        label="Refresh",
+        style=discord.ButtonStyle.secondary,
+        emoji="\U0001F501",
+        custom_id="profile_refresh",
+    )
+    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await self.build_embed()
+        self.sync_buttons()
+        await interaction.edit_original_response(embed=embed, view=self)
+
+
+# ---------------------------------------------------------------------------
+# !admin
+# ---------------------------------------------------------------------------
+class GiveLeavesModal(discord.ui.Modal):
+    """Admin panel dialog: hand out (or take away) leaves."""
+
+    def __init__(self, panel: "AdminView", lang: str = DEFAULT_LANG):
+        super().__init__(title=t(lang, "admin.give_modal")[:45])
+        self.panel = panel
+        self.lang = lang
+        self.user_field = discord.ui.TextInput(
+            label=t(lang, "admin.give_user")[:45],
+            placeholder="1264586393594630239",
+            max_length=64,
+        )
+        self.amount_field = discord.ui.TextInput(
+            label=t(lang, "admin.give_amount")[:45],
+            placeholder="25",
+            max_length=8,
+        )
+        self.add_item(self.user_field)
+        self.add_item(self.amount_field)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        lang = self.lang
+        match = re.search(r"\d{15,25}", str(self.user_field.value or ""))
+        if not match:
+            await interaction.response.send_message(
+                embed=embeds.error_embed(t(lang, "admin.give_bad_user"), lang=lang),
+                ephemeral=True,
+            )
+            return
+        user_id = int(match.group(0))
+
+        raw = str(self.amount_field.value or "").strip().replace("+", "")
+        try:
+            amount = int(raw)
+        except ValueError:
+            amount = 0
+        if amount == 0 or abs(amount) > MAX_GRANT:
+            await interaction.response.send_message(
+                embed=embeds.error_embed(
+                    t(lang, "grant.bad_amount", max=MAX_GRANT), lang=lang
+                ),
+                ephemeral=True,
+            )
+            return
+
+        balance = await self.panel.wallet.add(user_id, amount)
+        await interaction.response.send_message(
+            embed=embeds.leaves_granted_embed(user_id, amount, balance, lang),
+            ephemeral=True,
+        )
+
+        # Tell the lucky user about it (best effort).
+        if amount > 0:
+            try:
+                target = interaction.client.get_user(user_id) or await (
+                    interaction.client.fetch_user(user_id)
+                )
+                if target is not None:
+                    await target.send(
+                        embed=embeds.leaves_notice_embed(amount, balance, lang)
+                    )
+            except discord.HTTPException:
+                pass
+
+        # Refresh the panel behind the modal.
+        if self.panel.message is not None:
+            try:
+                embed = await self.panel.build_embed()
+                self.panel.sync_buttons()
+                await self.panel.message.edit(embed=embed, view=self.panel)
+            except discord.HTTPException:
+                pass
+
+
 class AdminView(discord.ui.View):
     """Owner-only panel: turn maintenance mode on/off and see live counters."""
 
@@ -504,8 +698,12 @@ class AdminView(discord.ui.View):
         bans: BanStore | None = None,
         lang: str = DEFAULT_LANG,
         slots: SlotStore = SLOTS,
+        wallet: Wallet = WALLET,
+        plan: PlanStore = PLAN_STORE,
     ):
         super().__init__(timeout=600)
+        self.wallet = wallet
+        self.plan = plan
         self.owner_id = owner_id
         self.maintenance = maintenance
         self.manager = manager
@@ -573,6 +771,22 @@ class AdminView(discord.ui.View):
             elif child.custom_id == "slot_minus":
                 child.label = t(self.lang, "admin.btn_slot_minus")
                 child.disabled = self.slots.total <= MIN_SLOTS
+            elif child.custom_id == "admin_give":
+                child.label = t(self.lang, "admin.btn_give")
+            elif child.custom_id == "admin_plan":
+                child.label = t(self.lang, "admin.btn_plan")
+            elif child.custom_id == "admin_ram_plus":
+                child.label = t(self.lang, "admin.btn_ram_plus")
+                child.disabled = self.plan.ram_mb >= MAX_RAM_MB
+            elif child.custom_id == "admin_ram_minus":
+                child.label = t(self.lang, "admin.btn_ram_minus")
+                child.disabled = self.plan.ram_mb <= MIN_RAM_MB
+            elif child.custom_id == "admin_disk_plus":
+                child.label = t(self.lang, "admin.btn_disk_plus")
+                child.disabled = self.plan.disk_gb >= MAX_DISK_GB
+            elif child.custom_id == "admin_disk_minus":
+                child.label = t(self.lang, "admin.btn_disk_minus")
+                child.disabled = self.plan.disk_gb <= MIN_DISK_GB
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id or not is_owner(interaction.user.id):
@@ -676,3 +890,102 @@ class AdminView(discord.ui.View):
         self, interaction: discord.Interaction, button: discord.ui.Button
     ):
         await self._change_slots(interaction, +1)
+
+    # ---- leaf economy ----
+    @discord.ui.button(
+        label="Give leaves",
+        style=discord.ButtonStyle.primary,
+        emoji="\U0001F343",
+        custom_id="admin_give",
+        row=2,
+    )
+    async def give_leaves(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await interaction.response.send_modal(GiveLeavesModal(self, self.lang))
+
+    # ---- free VPS resources (RAM / disk) ----
+    async def _change_plan(
+        self,
+        interaction: discord.Interaction,
+        ram_delta: int = 0,
+        disk_delta: int = 0,
+    ) -> None:
+        old = self.plan.plan()
+        if ram_delta:
+            new = await self.plan.add_ram(
+                ram_delta, interaction.user.id, str(interaction.user)
+            )
+        else:
+            new = await self.plan.add_disk(
+                disk_delta, interaction.user.id, str(interaction.user)
+            )
+        await interaction.response.defer()
+        embed = await self.build_embed()
+        self.sync_buttons()
+        await interaction.edit_original_response(embed=embed, view=self)
+        await interaction.followup.send(
+            embed=embeds.plan_changed_embed(old, new, self.lang), ephemeral=True
+        )
+
+    @discord.ui.button(
+        label="Resources",
+        style=discord.ButtonStyle.secondary,
+        emoji="\U0001F4E6",
+        custom_id="admin_plan",
+        row=2,
+    )
+    async def show_plan(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await interaction.response.send_message(
+            embed=embeds.plan_embed(self.lang), ephemeral=True
+        )
+
+    @discord.ui.button(
+        label="-RAM",
+        style=discord.ButtonStyle.secondary,
+        emoji="\U0001F9E9",
+        custom_id="admin_ram_minus",
+        row=3,
+    )
+    async def ram_minus(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await self._change_plan(interaction, ram_delta=-RAM_STEP)
+
+    @discord.ui.button(
+        label="+RAM",
+        style=discord.ButtonStyle.success,
+        emoji="\U0001F9E9",
+        custom_id="admin_ram_plus",
+        row=3,
+    )
+    async def ram_plus(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await self._change_plan(interaction, ram_delta=RAM_STEP)
+
+    @discord.ui.button(
+        label="-disk",
+        style=discord.ButtonStyle.secondary,
+        emoji="\U0001F4BD",
+        custom_id="admin_disk_minus",
+        row=3,
+    )
+    async def disk_minus(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await self._change_plan(interaction, disk_delta=-DISK_STEP)
+
+    @discord.ui.button(
+        label="+disk",
+        style=discord.ButtonStyle.success,
+        emoji="\U0001F4BD",
+        custom_id="admin_disk_plus",
+        row=3,
+    )
+    async def disk_plus(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await self._change_plan(interaction, disk_delta=DISK_STEP)

@@ -1,6 +1,6 @@
 """Cloudy VPS Bot - free VPS hosting from Discord.
 
-Version 1.1 Beta (bilingual RU / EN)
+Version 1.2 Beta (bilingual RU / EN, leaf economy)
 """
 
 from __future__ import annotations
@@ -26,9 +26,11 @@ from i18n import rules as rules_for
 from i18n import t
 from maintenance import MAINTENANCE
 from moderation import BanStore, ModerationError
+from plan_store import PLAN_STORE
 from slots import MAX_SLOTS, MIN_SLOTS, SLOTS
-from views import AdminView, DeployView, LanguageView, ManageView
+from views import AdminView, DeployView, LanguageView, ManageView, ProfileView
 from vps_manager import VPSError, VPSManager
+from wallet import MAX_GRANT, WALLET
 
 logging.basicConfig(
     level=logging.INFO,
@@ -68,6 +70,9 @@ class UnderMaintenance(commands.CheckFailure):
 # Commands that keep working while maintenance mode is ON.
 MAINTENANCE_ALLOWED = {
     "about",
+    "profile",
+    "bonus",
+    "give",
     "rules",
     "lang",
     "help",
@@ -75,6 +80,7 @@ MAINTENANCE_ALLOWED = {
     "admin",
     "maintenance",
     "slots",
+    "plan",
     "wipe",
 }
 
@@ -93,6 +99,8 @@ async def on_ready() -> None:
             log.error("Docker backend unavailable: %s", exc)
     if not presence_loop.is_running():
         presence_loop.start()
+    if not billing_loop.is_running():
+        billing_loop.start()
 
 
 async def _stats() -> dict:
@@ -214,6 +222,84 @@ async def _resolve_user_id(ctx: commands.Context, raw: str) -> tuple[int, str]:
 
 
 # ---------------------------------------------------------------------------
+# Leaf billing: a running VPS costs LEAF_COST_PER_HOUR leaves per hour
+# ---------------------------------------------------------------------------
+@tasks.loop(minutes=5)
+async def billing_loop() -> None:
+    """Charge leaves for running servers and stop the ones that ran out.
+
+    Nothing is ever deleted here - the container is only stopped, so the user
+    can top up (daily bonus) and start it again from `!manage`.
+    """
+    if manager is None:
+        return
+    try:
+        records = manager.all_records()
+    except Exception as exc:  # pragma: no cover
+        log.warning("billing: cannot read state: %s", exc)
+        return
+
+    for record in records:
+        owner_id = int(record.get("owner_id", 0) or 0)
+        if not owner_id:
+            continue
+        try:
+            info = await manager.get_info(owner_id)
+        except VPSError:
+            await WALLET.stop_billing(owner_id)
+            continue
+        except Exception as exc:  # pragma: no cover
+            log.warning("billing: no info for %s: %s", owner_id, exc)
+            continue
+
+        if str(info.get("status", "")).lower() != "running":
+            # A stopped VPS costs nothing.
+            await WALLET.stop_billing(owner_id)
+            continue
+        if is_owner(owner_id):
+            # Staff servers are free and unlimited.
+            continue
+
+        result = await WALLET.charge_due(owner_id, record.get("owner_name", ""))
+        if result.get("charged"):
+            log.info(
+                "billing: charged %s leaves from %s (balance %s)",
+                result["charged"],
+                owner_id,
+                result.get("balance"),
+            )
+        if not result.get("empty"):
+            continue
+
+        try:
+            stopped = await manager.stop_if_running(owner_id)
+        except Exception as exc:  # pragma: no cover
+            log.warning("billing: cannot stop VPS of %s: %s", owner_id, exc)
+            continue
+        if not stopped:
+            continue
+
+        await WALLET.stop_billing(owner_id)
+        log.info("billing: stopped VPS of %s (out of leaves)", owner_id)
+        try:
+            user = bot.get_user(owner_id) or await bot.fetch_user(owner_id)
+            if user is not None:
+                await user.send(
+                    embed=embeds.out_of_leaves_embed(
+                        info.get("name", "vps"), lang_of(owner_id)
+                    )
+                )
+        except (discord.HTTPException, AttributeError):
+            log.info("could not DM %s about the stopped VPS", owner_id)
+        await update_presence()
+
+
+@billing_loop.before_loop
+async def _before_billing_loop() -> None:
+    await bot.wait_until_ready()
+
+
+# ---------------------------------------------------------------------------
 # User commands
 # ---------------------------------------------------------------------------
 @bot.command(name="deploy")
@@ -238,6 +324,15 @@ async def deploy(ctx: commands.Context) -> None:
     except VPSError as exc:
         await ctx.reply(
             embed=embeds.error_embed(str(exc), lang=lang), mention_author=False
+        )
+        return
+
+    # A free VPS still needs leaves to stay online.
+    await WALLET.ensure(ctx.author.id, str(ctx.author))
+    if not is_owner(ctx.author.id) and not WALLET.can_run(ctx.author.id):
+        await ctx.reply(
+            embed=embeds.low_leaves_embed(WALLET.balance(ctx.author.id), lang),
+            mention_author=False,
         )
         return
 
@@ -367,6 +462,7 @@ async def destroy(ctx: commands.Context) -> None:
     try:
         mgr = _require_manager()
         await mgr.delete_vps(ctx.author.id)
+        await WALLET.stop_billing(ctx.author.id)
         await update_presence()
     except VPSError as exc:
         await ctx.reply(
@@ -696,6 +792,7 @@ async def wipe_cmd(ctx: commands.Context, target: str = "", *, reason: str = "")
 
     try:
         await mgr.delete_vps(user_id)
+        await WALLET.stop_billing(user_id)
     except VPSError as exc:
         await ctx.reply(
             embed=embeds.error_embed(str(exc), lang=lang), mention_author=False
@@ -716,6 +813,204 @@ async def wipe_cmd(ctx: commands.Context, target: str = "", *, reason: str = "")
     await ctx.reply(
         embed=embeds.vps_wiped_embed(user_id, stats, lang), mention_author=False
     )
+
+
+# ---------------------------------------------------------------------------
+# Profile, daily bonus and leaves
+# ---------------------------------------------------------------------------
+@bot.command(
+    name="profile",
+    aliases=[
+        "me",
+        "bal",
+        "balance",
+        "\u043f\u0440\u043e\u0444\u0438\u043b\u044c",
+        "\u0431\u0430\u043b\u0430\u043d\u0441",
+        "\u043b\u0438\u0441\u0442\u0438\u043a\u0438",
+    ],
+)
+@commands.cooldown(1, 5, commands.BucketType.user)
+async def profile_cmd(ctx: commands.Context, target: str = "") -> None:
+    """!profile - name, ID, leaf balance and the daily bonus button."""
+    lang = lang_of(ctx.author)
+    user: discord.abc.User = ctx.author
+
+    # Staff may look at somebody else's profile: !profile @user
+    if target and is_owner(ctx.author.id):
+        try:
+            user_id, _name = await _resolve_user_id(ctx, target)
+            user = bot.get_user(user_id) or await bot.fetch_user(user_id)
+        except (ModerationError, discord.HTTPException) as exc:
+            await ctx.reply(
+                embed=embeds.error_embed(str(exc), lang=lang), mention_author=False
+            )
+            return
+
+    await WALLET.ensure(user.id, str(user))
+    view = ProfileView(user, manager, lang=lang)
+    embed = await view.build_embed()
+    view.sync_buttons()
+    msg = await ctx.reply(embed=embed, view=view, mention_author=False)
+    view.message = msg
+
+
+@bot.command(name="bonus", aliases=["daily", "\u0431\u043e\u043d\u0443\u0441"])
+@commands.cooldown(1, 5, commands.BucketType.user)
+async def bonus_cmd(ctx: commands.Context) -> None:
+    """!bonus - claim the daily leaves."""
+    lang = lang_of(ctx.author)
+    result = await WALLET.claim_bonus(ctx.author.id, str(ctx.author))
+    await ctx.reply(
+        embed=embeds.bonus_claimed_embed(result, lang), mention_author=False
+    )
+
+
+@bot.command(
+    name="give",
+    aliases=[
+        "grant",
+        "leaves",
+        "\u0432\u044b\u0434\u0430\u0442\u044c",
+        "\u0432\u044b\u0434\u0430\u0442\u044c\u043b\u0438\u0441\u0442\u0438\u043a",
+    ],
+)
+@owner_only()
+async def give_cmd(
+    ctx: commands.Context, target: str = "", amount: str = ""
+) -> None:
+    """!give <@user|id> <amount> - hand out leaves (negative takes them away)."""
+    lang = lang_of(ctx.author)
+    if not target or not amount:
+        await ctx.reply(
+            embed=embeds.error_embed(
+                t(lang, "grant.usage", prefix=COMMAND_PREFIX), lang=lang
+            ),
+            mention_author=False,
+        )
+        return
+
+    try:
+        user_id, name = await _resolve_user_id(ctx, target)
+    except ModerationError as exc:
+        await ctx.reply(
+            embed=embeds.error_embed(str(exc), lang=lang), mention_author=False
+        )
+        return
+
+    try:
+        value = int(str(amount).strip().replace("+", ""))
+    except (TypeError, ValueError):
+        value = 0
+    if value == 0 or abs(value) > MAX_GRANT:
+        await ctx.reply(
+            embed=embeds.error_embed(
+                t(lang, "grant.bad_amount", max=MAX_GRANT), lang=lang
+            ),
+            mention_author=False,
+        )
+        return
+
+    balance = await WALLET.add(user_id, value, name)
+    await ctx.reply(
+        embed=embeds.leaves_granted_embed(user_id, value, balance, lang),
+        mention_author=False,
+    )
+
+    if value > 0:
+        try:
+            user = bot.get_user(user_id) or await bot.fetch_user(user_id)
+            if user is not None:
+                await user.send(
+                    embed=embeds.leaves_notice_embed(
+                        value, balance, lang_of(user_id)
+                    )
+                )
+        except (discord.HTTPException, AttributeError):
+            log.info("could not DM %s about the new leaves", user_id)
+
+
+# ---------------------------------------------------------------------------
+# Free VPS resources (staff)
+# ---------------------------------------------------------------------------
+def _plan_number(value: str) -> float | None:
+    """Parse "2048", "2gb", "1,5" into a number (None when it is not one)."""
+    raw = str(value or "").strip().lower().replace(",", ".")
+    for junk in ("mib", "gib", "mb", "gb", "vcpu", "cpu", "g", "m"):
+        if raw.endswith(junk):
+            raw = raw[: -len(junk)].strip()
+            break
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+@bot.command(
+    name="plan",
+    aliases=[
+        "resources",
+        "\u0440\u0435\u0441\u0443\u0440\u0441\u044b",
+        "\u0442\u0430\u0440\u0438\u0444",
+    ],
+)
+@owner_only()
+async def plan_cmd(ctx: commands.Context, action: str = "", value: str = "") -> None:
+    """!plan - show the free plan. !plan ram 2048 | disk 20 | cpu 2 | reset."""
+    lang = lang_of(ctx.author)
+    raw = (action or "").strip().lower()
+
+    if not raw:
+        await ctx.reply(embed=embeds.plan_embed(lang), mention_author=False)
+        return
+
+    old = PLAN_STORE.plan()
+
+    if raw in {"reset", "default", "\u0441\u0431\u0440\u043e\u0441"}:
+        new = await PLAN_STORE.reset(ctx.author.id, str(ctx.author))
+    else:
+        number = _plan_number(value)
+        if number is None:
+            await ctx.reply(
+                embed=embeds.error_embed(
+                    t(lang, "plan.bad_value", prefix=COMMAND_PREFIX), lang=lang
+                ),
+                mention_author=False,
+            )
+            return
+
+        moderator = {"moderator_id": ctx.author.id, "moderator_name": str(ctx.author)}
+        if raw in {
+            "ram",
+            "memory",
+            "mem",
+            "\u043e\u0437\u0443",
+            "\u043f\u0430\u043c\u044f\u0442\u044c",
+        }:
+            new = await PLAN_STORE.update(ram_mb=number, **moderator)
+        elif raw in {"disk", "storage", "\u0434\u0438\u0441\u043a"}:
+            new = await PLAN_STORE.update(disk_gb=number, **moderator)
+        elif raw in {
+            "cpu",
+            "cores",
+            "vcpu",
+            "\u043f\u0440\u043e\u0446\u0435\u0441\u0441\u043e\u0440",
+        }:
+            new = await PLAN_STORE.update(cpu_cores=number, **moderator)
+        elif raw == "swap":
+            new = await PLAN_STORE.update(swap_mb=number, **moderator)
+        else:
+            await ctx.reply(
+                embed=embeds.error_embed(
+                    t(lang, "plan.usage", prefix=COMMAND_PREFIX), lang=lang
+                ),
+                mention_author=False,
+            )
+            return
+
+    await ctx.reply(
+        embed=embeds.plan_changed_embed(old, new, lang), mention_author=False
+    )
+    await ctx.send(embed=embeds.plan_embed(lang))
 
 
 # ---------------------------------------------------------------------------

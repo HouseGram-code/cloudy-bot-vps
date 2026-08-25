@@ -22,6 +22,7 @@ and a button-based control panel.
 | `!unban <@user\|id>` | **Staff.** Restores access and DMs the user. |
 | `!bans` | **Staff.** List of all bans with reason and moderator. |
 | `!servers` | **Staff.** All deployed servers and their owners. |
+| `!plan` | **Staff.** Show the free-tier resources; `!plan ram 4096`, `!plan disk 30`, `!plan cpu 2`, `!plan reset` change them live. |
 | `!ping` | Latency check. |
 | `!lang` / `!язык` | Language picker (🇷🇺 Русский / 🇬🇧 English). Also `!lang ru`, `!lang en`. |
 | `!help` | Command list. |
@@ -34,14 +35,15 @@ One VPS per Discord user by default (`MAX_VPS_PER_USER`).
 
 | Resource | Value |
 |---|---|
-| RAM | 1024 MB (+512 MB swap) |
-| CPU | 1 vCPU (`--cpus=1`) |
-| Disk | 10 GB |
+| RAM | 2048 MB (+1024 MB swap) |
+| CPU | 2 vCPU (`--cpus=2`) |
+| Disk | 20 GB |
 | OS | Ubuntu 22.04 LTS (Jammy) |
 | Access | tmate SSH (root) |
 | Bandwidth | Unmetered (fair use) |
 
-All of it is configurable in `.env`.
+All of it is configurable in `.env` **and** live-editable with `!plan` /
+the buttons in `!admin` (see "Free VPS resources" below).
 
 ---
 
@@ -494,3 +496,70 @@ Now the bot:
 
 To see it: `!manage` → **Get SSH** (a fresh key re-installs the banner), or type
 `banner` inside the VPS.
+
+## Leaves (the free-VPS currency)
+
+Every user has a balance of leaves. Leaves are what keeps a free VPS online:
+
+* a new account starts with **3** leaves (`START_LEAVES`)
+* a **running** VPS costs **1** leaf per hour (`LEAF_COST_PER_HOUR`); a stopped one is free
+* `!bonus` (or the green button on `!profile`) gives **+25** leaves once every **24 h**
+* at **0** leaves the VPS is **stopped, never deleted** - the owner gets a DM and can start it again from `!manage` after topping up
+* staff servers (owner IDs) are never charged
+
+Commands:
+
+* `!profile` (`!me`, `!bal`, `!balance`, RU: `!profile` / `!balans` / `!listiki`) - name, ID, balance, remaining uptime, VPS status, bonus timer
+* `!bonus` (`!daily`, RU `!bonus`) - claim the daily leaves
+* `!give <@user|id> <amount>` - staff only; a negative amount takes leaves away. The same thing is available as the **Give leaves** button in `!admin`.
+
+Balances live in `WALLET_FILE` (`/app/data/wallet.json` by default), so they survive restarts.
+Billing runs every 5 minutes and charges every full hour of uptime, so a restart never double-charges.
+
+---
+
+## Free VPS resources (live editable)
+
+The free tier used to be frozen in `.env`. Now the resources of every **new**
+VPS can be changed while the bot is running:
+
+```
+!plan                # staff: current RAM / vCPU / disk + limits
+!plan ram 4096       # 4 GB of RAM (swap follows automatically: RAM / 2)
+!plan disk 30        # 30 GB of disk
+!plan cpu 2          # 2 vCPU
+!plan swap 2048      # explicit swap size
+!plan reset          # back to the .env defaults
+```
+
+The admin panel (`!admin`) has the same controls as buttons:
+**Resources** (show the card), **-512 MB / +512 MB RAM** and
+**-5 GB / +5 GB disk**.
+
+| Setting | Range |
+|---|---|
+| RAM | 256 - 16384 MB |
+| Disk | 5 - 200 GB |
+| CPU | 0.5 - 8 vCPU |
+
+* Values are clamped to those ranges, so a wrong number can never break Docker.
+* New limits apply to **newly created** servers. A running VPS keeps the limits
+  it was created with (Docker cannot resize a live container's disk) - recreate
+  it with `!destroy` + `!deploy` to pick up the new plan.
+* The plan is stored in `PLAN_FILE` (`data/plan.json`), so it survives restarts.
+* The in-VPS banner now reads the limits from the container itself, so an old
+  server no longer shows the new plan's numbers.
+
+---
+
+## Other fixes in this build
+
+* `!manage` was redesigned: RAM / CPU / disk / network now live in one aligned
+  monospace panel with soft bars, plus separate OS / uptime / created / ID /
+  hostname / status fields and a hint when the server is off.
+* The "VPS limit reached" message is localized (RU / EN) and uses the real
+  command prefix instead of a hardcoded `!`.
+* `!deploy`, `!about` and the admin panel always show the live plan instead of
+  the values baked in at start-up.
+* Metrics are read defensively (`info.get(...)`), so a container that reports
+  no stats yet can no longer break the control panel with a `KeyError`.

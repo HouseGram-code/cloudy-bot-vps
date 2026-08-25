@@ -391,6 +391,190 @@ STRINGS: dict[str, dict[str, str]] = {
             "\u041a\u043e\u0433\u0434\u0430 \u043f\u043e\u044f\u0432\u0438\u0442\u0441\u044f \u0441\u0432\u043e\u0431\u043e\u0434\u043d\u044b\u0439 \u0441\u043b\u043e\u0442, \u043c\u043e\u0436\u043d\u043e \u0441\u043e\u0437\u0434\u0430\u0442\u044c \u043d\u043e\u0432\u044b\u0439 \u0447\u0435\u0440\u0435\u0437 `{prefix}deploy`."
         ),
     },
+    # ---------------- profile / leaf economy ----------------
+    "profile.title": {"en": "Profile", "ru": "\u041f\u0440\u043e\u0444\u0438\u043b\u044c"},
+    "profile.desc": {
+        "en": "Your account, your leaves and your free VPS \u2014 all in one card.",
+        "ru": "\u0412\u0430\u0448 \u0430\u043a\u043a\u0430\u0443\u043d\u0442, \u043b\u0438\u0441\u0442\u0438\u043a\u0438 \u0438 \u0431\u0435\u0441\u043f\u043b\u0430\u0442\u043d\u044b\u0439 VPS \u2014 \u0432\u0441\u0451 \u0432 \u043e\u0434\u043d\u043e\u0439 \u043a\u0430\u0440\u0442\u043e\u0447\u043a\u0435.",
+    },
+    "profile.name": {"en": "Name", "ru": "\u0418\u043c\u044f"},
+    "profile.id": {"en": "ID", "ru": "\u0410\u0439\u0434\u0438"},
+    "profile.balance": {"en": "Leaves", "ru": "\u041b\u0438\u0441\u0442\u0438\u043a\u0438"},
+    "profile.balance_value": {
+        "en": "**{leaves}** \U0001F343 \u2022 `-{cost}/h` while the VPS runs",
+        "ru": "**{leaves}** \U0001F343 \u2022 `-{cost}/\u0447\u0430\u0441` \u043f\u043e\u043a\u0430 VPS \u0440\u0430\u0431\u043e\u0442\u0430\u0435\u0442",
+    },
+    "profile.runtime": {"en": "Uptime left", "ru": "\u0425\u0432\u0430\u0442\u0438\u0442 \u043d\u0430"},
+    "profile.runtime_value": {
+        "en": "\u2248 **{hours} h** of VPS uptime",
+        "ru": "\u2248 **{hours} \u0447** \u0440\u0430\u0431\u043e\u0442\u044b VPS",
+    },
+    "profile.runtime_empty": {
+        "en": "No leaves left \u2014 claim the bonus to keep the VPS alive.",
+        "ru": "\u041b\u0438\u0441\u0442\u0438\u043a\u043e\u0432 \u043d\u0435\u0442 \u2014 \u0437\u0430\u0431\u0435\u0440\u0438\u0442\u0435 \u0431\u043e\u043d\u0443\u0441, \u0447\u0442\u043e\u0431\u044b VPS \u0440\u0430\u0431\u043e\u0442\u0430\u043b.",
+    },
+    "profile.vps": {"en": "Your VPS", "ru": "\u0412\u0430\u0448 VPS"},
+    "profile.vps_yes": {
+        "en": "`{name}` \u2022 {status}",
+        "ru": "`{name}` \u2022 {status}",
+    },
+    "profile.vps_none": {
+        "en": "You have none yet \u2014 `{prefix}deploy` gives you a free one.",
+        "ru": "\u041f\u043e\u043a\u0430 \u043d\u0435\u0442 \u2014 `{prefix}deploy` \u0432\u044b\u0434\u0430\u0441\u0442 \u0431\u0435\u0441\u043f\u043b\u0430\u0442\u043d\u044b\u0439.",
+    },
+    "profile.bonus": {"en": "Daily bonus", "ru": "\u0415\u0436\u0435\u0434\u043d\u0435\u0432\u043d\u044b\u0439 \u0431\u043e\u043d\u0443\u0441"},
+    "profile.bonus_ready": {
+        "en": "**Ready!** Press the button below for **+{amount}** \U0001F343",
+        "ru": "**\u0414\u043e\u0441\u0442\u0443\u043f\u0435\u043d!** \u041d\u0430\u0436\u043c\u0438\u0442\u0435 \u043a\u043d\u043e\u043f\u043a\u0443 \u043d\u0438\u0436\u0435 \u0438 \u043f\u043e\u043b\u0443\u0447\u0438\u0442\u0435 **+{amount}** \U0001F343",
+    },
+    "profile.bonus_wait": {
+        "en": "Claimed \u2022 next **+{amount}** \U0001F343 <t:{ts}:R>",
+        "ru": "\u0423\u0436\u0435 \u0432\u0437\u044f\u0442 \u2022 \u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0438\u0435 **+{amount}** \U0001F343 <t:{ts}:R>",
+    },
+    "profile.stats": {"en": "Stats", "ru": "\u0421\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043a\u0430"},
+    "profile.stats_value": {
+        "en": "Earned **{earned}** \u2022 spent **{spent}** \u2022 bonuses **{bonuses}**",
+        "ru": "\u041f\u043e\u043b\u0443\u0447\u0435\u043d\u043e **{earned}** \u2022 \u043f\u043e\u0442\u0440\u0430\u0447\u0435\u043d\u043e **{spent}** \u2022 \u0431\u043e\u043d\u0443\u0441\u043e\u0432 **{bonuses}**",
+    },
+    "profile.economy": {"en": "How leaves work", "ru": "\u041a\u0430\u043a \u0440\u0430\u0431\u043e\u0442\u0430\u044e\u0442 \u043b\u0438\u0441\u0442\u0438\u043a\u0438"},
+    "profile.economy_value": {
+        "en": (
+            "\u2022 new accounts start with **{start}** \U0001F343\n"
+            "\u2022 a running VPS costs **{cost}** \U0001F343 per hour\n"
+            "\u2022 `{prefix}bonus` gives **+{amount}** \U0001F343 once every {hours} h\n"
+            "\u2022 at **0** \U0001F343 the VPS is only stopped, never deleted"
+        ),
+        "ru": (
+            "\u2022 \u043d\u043e\u0432\u044b\u043c \u0432\u044b\u0434\u0430\u0451\u0442\u0441\u044f **{start}** \U0001F343\n"
+            "\u2022 \u0440\u0430\u0431\u043e\u0442\u0430\u044e\u0449\u0438\u0439 VPS \u0441\u0442\u043e\u0438\u0442 **{cost}** \U0001F343 \u0432 \u0447\u0430\u0441\n"
+            "\u2022 `{prefix}bonus` \u0434\u0430\u0451\u0442 **+{amount}** \U0001F343 \u0440\u0430\u0437 \u0432 {hours} \u0447\n"
+            "\u2022 \u043d\u0430 **0** \U0001F343 VPS \u0442\u043e\u043b\u044c\u043a\u043e \u043e\u0441\u0442\u0430\u043d\u0430\u0432\u043b\u0438\u0432\u0430\u0435\u0442\u0441\u044f, \u043d\u043e \u043d\u0435 \u0443\u0434\u0430\u043b\u044f\u0435\u0442\u0441\u044f"
+        ),
+    },
+    "btn.bonus": {"en": "Daily bonus", "ru": "\u0411\u043e\u043d\u0443\u0441"},
+    "btn.bonus_wait": {"en": "Bonus taken", "ru": "\u0411\u043e\u043d\u0443\u0441 \u0432\u0437\u044f\u0442"},
+    "btn.profile_refresh": {"en": "Refresh", "ru": "\u041e\u0431\u043d\u043e\u0432\u0438\u0442\u044c"},
+    "bonus.ok_title": {
+        "en": "Daily bonus claimed",
+        "ru": "\u0411\u043e\u043d\u0443\u0441 \u043f\u043e\u043b\u0443\u0447\u0435\u043d",
+    },
+    "bonus.ok": {
+        "en": "**+{amount}** \U0001F343 added \u2014 your balance is now **{balance}** \U0001F343 (\u2248 {hours} h of uptime).\nCome back <t:{ts}:R> for the next one.",
+        "ru": "**+{amount}** \U0001F343 \u043d\u0430\u0447\u0438\u0441\u043b\u0435\u043d\u043e \u2014 \u0431\u0430\u043b\u0430\u043d\u0441 \u0442\u0435\u043f\u0435\u0440\u044c **{balance}** \U0001F343 (\u2248 {hours} \u0447 \u0440\u0430\u0431\u043e\u0442\u044b).\n\u0417\u0430\u0445\u043e\u0434\u0438\u0442\u0435 \u0441\u043d\u043e\u0432\u0430 <t:{ts}:R>.",
+    },
+    "bonus.wait_title": {
+        "en": "Bonus already claimed",
+        "ru": "\u0411\u043e\u043d\u0443\u0441 \u0443\u0436\u0435 \u0432\u0437\u044f\u0442",
+    },
+    "bonus.wait": {
+        "en": "The daily bonus is available once every {hours} h.\nNext **+{amount}** \U0001F343 <t:{ts}:R>.",
+        "ru": "\u0411\u043e\u043d\u0443\u0441 \u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d \u0440\u0430\u0437 \u0432 {hours} \u0447.\n\u0421\u043b\u0435\u0434\u0443\u044e\u0449\u0438\u0435 **+{amount}** \U0001F343 <t:{ts}:R>.",
+    },
+    "grant.title": {"en": "Leaves updated", "ru": "\u0411\u0430\u043b\u0430\u043d\u0441 \u0438\u0437\u043c\u0435\u043d\u0451\u043d"},
+    "grant.given": {
+        "en": "Gave **+{amount}** \U0001F343 to <@{user}>.\nNew balance: **{balance}** \U0001F343",
+        "ru": "\u0412\u044b\u0434\u0430\u043d\u043e **+{amount}** \U0001F343 \u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044e <@{user}>.\n\u041d\u043e\u0432\u044b\u0439 \u0431\u0430\u043b\u0430\u043d\u0441: **{balance}** \U0001F343",
+    },
+    "grant.taken": {
+        "en": "Removed **{amount}** \U0001F343 from <@{user}>.\nNew balance: **{balance}** \U0001F343",
+        "ru": "\u0421\u043f\u0438\u0441\u0430\u043d\u043e **{amount}** \U0001F343 \u0443 <@{user}>.\n\u041d\u043e\u0432\u044b\u0439 \u0431\u0430\u043b\u0430\u043d\u0441: **{balance}** \U0001F343",
+    },
+    "grant.usage": {
+        "en": "Usage: `{prefix}give <@user|id> <amount>` \u2014 for example `{prefix}give @user 25`. A negative amount takes leaves away.",
+        "ru": "\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d\u0438\u0435: `{prefix}give <@\u044e\u0437\u0435\u0440|id> <\u043a\u043e\u043b\u0438\u0447\u0435\u0441\u0442\u0432\u043e>` \u2014 \u043d\u0430\u043f\u0440\u0438\u043c\u0435\u0440 `{prefix}give @user 25`. \u041e\u0442\u0440\u0438\u0446\u0430\u0442\u0435\u043b\u044c\u043d\u043e\u0435 \u0447\u0438\u0441\u043b\u043e \u0441\u043f\u0438\u0441\u044b\u0432\u0430\u0435\u0442.",
+    },
+    "grant.bad_amount": {
+        "en": "The amount must be a whole number between -{max} and {max}.",
+        "ru": "\u041a\u043e\u043b\u0438\u0447\u0435\u0441\u0442\u0432\u043e \u0434\u043e\u043b\u0436\u043d\u043e \u0431\u044b\u0442\u044c \u0446\u0435\u043b\u044b\u043c \u0447\u0438\u0441\u043b\u043e\u043c \u043e\u0442 -{max} \u0434\u043e {max}.",
+    },
+    "grant.notice_title": {
+        "en": "You received leaves",
+        "ru": "\u0412\u0430\u043c \u043d\u0430\u0447\u0438\u0441\u043b\u0438\u043b\u0438 \u043b\u0438\u0441\u0442\u0438\u043a\u0438",
+    },
+    "grant.notice": {
+        "en": "Staff added **+{amount}** \U0001F343 to your account.\nBalance: **{balance}** \U0001F343 (\u2248 {hours} h of VPS uptime).",
+        "ru": "\u0410\u0434\u043c\u0438\u043d\u0438\u0441\u0442\u0440\u0430\u0446\u0438\u044f \u043d\u0430\u0447\u0438\u0441\u043b\u0438\u043b\u0430 \u0432\u0430\u043c **+{amount}** \U0001F343.\n\u0411\u0430\u043b\u0430\u043d\u0441: **{balance}** \U0001F343 (\u2248 {hours} \u0447 \u0440\u0430\u0431\u043e\u0442\u044b VPS).",
+    },
+    "leaves.low_title": {
+        "en": "Not enough leaves",
+        "ru": "\u041d\u0435 \u0445\u0432\u0430\u0442\u0430\u0435\u0442 \u043b\u0438\u0441\u0442\u0438\u043a\u043e\u0432",
+    },
+    "leaves.low": {
+        "en": "A VPS costs **{cost}** \U0001F343 per hour and you have **{balance}** \U0001F343.\nGrab the daily bonus with `{prefix}bonus` (**+{amount}** \U0001F343) and try again.",
+        "ru": "VPS \u0441\u0442\u043e\u0438\u0442 **{cost}** \U0001F343 \u0432 \u0447\u0430\u0441, \u0430 \u0443 \u0432\u0430\u0441 **{balance}** \U0001F343.\n\u0417\u0430\u0431\u0435\u0440\u0438\u0442\u0435 \u0431\u043e\u043d\u0443\u0441 \u0447\u0435\u0440\u0435\u0437 `{prefix}bonus` (**+{amount}** \U0001F343) \u0438 \u043f\u043e\u043f\u0440\u043e\u0431\u0443\u0439\u0442\u0435 \u0441\u043d\u043e\u0432\u0430.",
+    },
+    "billing.title": {
+        "en": "VPS stopped \u2014 out of leaves",
+        "ru": "VPS \u043e\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d \u2014 \u0437\u0430\u043a\u043e\u043d\u0447\u0438\u043b\u0438\u0441\u044c \u043b\u0438\u0441\u0442\u0438\u043a\u0438",
+    },
+    "billing.desc": {
+        "en": "Your VPS `{name}` was stopped because your balance reached **0** \U0001F343.\n**Nothing is deleted** \u2014 all your files are still there.\n\nTake the daily bonus with `{prefix}bonus` (**+{amount}** \U0001F343) and start the server again from `{prefix}manage`.",
+        "ru": "\u0412\u0430\u0448 VPS `{name}` \u043e\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d: \u0431\u0430\u043b\u0430\u043d\u0441 \u0434\u043e\u0448\u0451\u043b \u0434\u043e **0** \U0001F343.\n**\u041d\u0438\u0447\u0435\u0433\u043e \u043d\u0435 \u0443\u0434\u0430\u043b\u0435\u043d\u043e** \u2014 \u0432\u0441\u0435 \u0444\u0430\u0439\u043b\u044b \u043d\u0430 \u043c\u0435\u0441\u0442\u0435.\n\n\u0417\u0430\u0431\u0435\u0440\u0438\u0442\u0435 \u0431\u043e\u043d\u0443\u0441 \u0447\u0435\u0440\u0435\u0437 `{prefix}bonus` (**+{amount}** \U0001F343) \u0438 \u0432\u043a\u043b\u044e\u0447\u0438\u0442\u0435 \u0441\u0435\u0440\u0432\u0435\u0440 \u0441\u043d\u043e\u0432\u0430 \u0447\u0435\u0440\u0435\u0437 `{prefix}manage`.",
+    },
+    "admin.leaves": {"en": "Leaf economy", "ru": "\u041b\u0438\u0441\u0442\u0438\u043a\u0438"},
+    "admin.leaves_value": {
+        "en": "start **{start}** \u2022 **{cost}**/h \u2022 bonus **+{amount}** / {hours} h",
+        "ru": "\u0441\u0442\u0430\u0440\u0442 **{start}** \u2022 **{cost}**/\u0447\u0430\u0441 \u2022 \u0431\u043e\u043d\u0443\u0441 **+{amount}** / {hours} \u0447",
+    },
+    "admin.btn_give": {"en": "Give leaves", "ru": "\u0412\u044b\u0434\u0430\u0442\u044c \u043b\u0438\u0441\u0442\u0438\u043a\u0438"},
+    "admin.give_modal": {
+        "en": "Give leaves to a user",
+        "ru": "\u0412\u044b\u0434\u0430\u0447\u0430 \u043b\u0438\u0441\u0442\u0438\u043a\u043e\u0432",
+    },
+    "admin.give_user": {
+        "en": "User ID or mention",
+        "ru": "ID \u0438\u043b\u0438 \u0443\u043f\u043e\u043c\u0438\u043d\u0430\u043d\u0438\u0435",
+    },
+    "admin.give_amount": {
+        "en": "Amount of leaves (can be negative)",
+        "ru": "\u0421\u043a\u043e\u043b\u044c\u043a\u043e \u043b\u0438\u0441\u0442\u0438\u043a\u043e\u0432 (\u043c\u043e\u0436\u043d\u043e \u043c\u0438\u043d\u0443\u0441)",
+    },
+    "admin.give_bad_user": {
+        "en": "Could not read that user. Use a numeric ID or a mention.",
+        "ru": "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043f\u043e\u043d\u044f\u0442\u044c \u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044f. \u0423\u043a\u0430\u0436\u0438\u0442\u0435 \u0447\u0438\u0441\u043b\u043e\u0432\u043e\u0439 ID \u0438\u043b\u0438 \u0443\u043f\u043e\u043c\u0438\u043d\u0430\u043d\u0438\u0435.",
+    },
+    "help.profile": {
+        "en": "Your profile: name, ID, leaf balance and the daily bonus button.",
+        "ru": "\u0412\u0430\u0448 \u043f\u0440\u043e\u0444\u0438\u043b\u044c: \u0438\u043c\u044f, \u0430\u0439\u0434\u0438, \u0431\u0430\u043b\u0430\u043d\u0441 \u043b\u0438\u0441\u0442\u0438\u043a\u043e\u0432 \u0438 \u043a\u043d\u043e\u043f\u043a\u0430 \u0431\u043e\u043d\u0443\u0441\u0430.",
+    },
+    "help.bonus": {
+        "en": "Claim **+{amount}** \U0001F343 once every {hours} hours.",
+        "ru": "\u041f\u043e\u043b\u0443\u0447\u0438\u0442\u044c **+{amount}** \U0001F343 \u0440\u0430\u0437 \u0432 {hours} \u0447\u0430\u0441\u043e\u0432.",
+    },
+    # ---------------- resource plan (RAM / disk / vCPU) ----------------
+    "plan.title": {"en": "Free VPS resources", "ru": "\u0420\u0435\u0441\u0443\u0440\u0441\u044b \u0431\u0435\u0441\u043f\u043b\u0430\u0442\u043d\u043e\u0433\u043e VPS"},
+    "plan.desc": {"en": "What every new free VPS gets. Staff can change it live with the buttons in `{prefix}admin` or with `{prefix}plan`.", "ru": "\u0421\u043a\u043e\u043b\u044c\u043a\u043e \u0440\u0435\u0441\u0443\u0440\u0441\u043e\u0432 \u043f\u043e\u043b\u0443\u0447\u0430\u0435\u0442 \u043a\u0430\u0436\u0434\u044b\u0439 \u043d\u043e\u0432\u044b\u0439 \u0431\u0435\u0441\u043f\u043b\u0430\u0442\u043d\u044b\u0439 VPS. \u0410\u0434\u043c\u0438\u043d\u044b \u043c\u0435\u043d\u044f\u044e\u0442 \u044d\u0442\u043e \u043a\u043d\u043e\u043f\u043a\u0430\u043c\u0438 \u0432 `{prefix}admin` \u0438\u043b\u0438 \u043a\u043e\u043c\u0430\u043d\u0434\u043e\u0439 `{prefix}plan`."},
+    "plan.ram": {"en": "Memory", "ru": "\u041e\u0417\u0423"},
+    "plan.ram_value": {"en": "**{ram} MB**\n`+ {swap} MB swap`", "ru": "**{ram} \u041c\u0411**\n`+ {swap} \u041c\u0411 swap`"},
+    "plan.cpu": {"en": "Processor", "ru": "\u041f\u0440\u043e\u0446\u0435\u0441\u0441\u043e\u0440"},
+    "plan.cpu_value": {"en": "**{cpu} vCPU**", "ru": "**{cpu} vCPU**"},
+    "plan.disk": {"en": "Storage", "ru": "\u0414\u0438\u0441\u043a"},
+    "plan.disk_value": {"en": "**{disk} GB**\n`SSD`", "ru": "**{disk} \u0413\u0411**\n`SSD`"},
+    "plan.limits": {"en": "Limits", "ru": "\u0413\u0440\u0430\u043d\u0438\u0446\u044b"},
+    "plan.limits_value": {"en": "RAM `{ram_min}-{ram_max} MB` \u2022 Disk `{disk_min}-{disk_max} GB` \u2022 CPU `{cpu_min}-{cpu_max}`", "ru": "\u041e\u0417\u0423 `{ram_min}-{ram_max} \u041c\u0411` \u2022 \u0434\u0438\u0441\u043a `{disk_min}-{disk_max} \u0413\u0411` \u2022 CPU `{cpu_min}-{cpu_max}`"},
+    "plan.note": {"en": "Good to know", "ru": "\u0412\u0430\u0436\u043d\u043e"},
+    "plan.note_value": {"en": "New limits apply to **newly created** servers. Existing VPS keep their current resources until they are recreated with `{prefix}destroy` + `{prefix}deploy`.", "ru": "\u041d\u043e\u0432\u044b\u0435 \u043b\u0438\u043c\u0438\u0442\u044b \u0434\u0435\u0439\u0441\u0442\u0432\u0443\u044e\u0442 \u0434\u043b\u044f **\u043d\u043e\u0432\u044b\u0445** \u0441\u0435\u0440\u0432\u0435\u0440\u043e\u0432. \u0423\u0436\u0435 \u0441\u043e\u0437\u0434\u0430\u043d\u043d\u044b\u0435 VPS \u0441\u043e\u0445\u0440\u0430\u043d\u044f\u044e\u0442 \u0441\u0432\u043e\u0438 \u0440\u0435\u0441\u0443\u0440\u0441\u044b, \u043f\u043e\u043a\u0430 \u0438\u0445 \u043d\u0435 \u043f\u0435\u0440\u0435\u0441\u043e\u0437\u0434\u0430\u0434\u0443\u0442 \u0447\u0435\u0440\u0435\u0437 `{prefix}destroy` + `{prefix}deploy`."},
+    "plan.changed_title": {"en": "Resources updated", "ru": "\u0420\u0435\u0441\u0443\u0440\u0441\u044b \u043e\u0431\u043d\u043e\u0432\u043b\u0435\u043d\u044b"},
+    "plan.changed": {"en": "RAM: **{old_ram} \u2192 {ram} MB**\nCPU: **{old_cpu} \u2192 {cpu} vCPU**\nDisk: **{old_disk} \u2192 {disk} GB**", "ru": "\u041e\u0417\u0423: **{old_ram} \u2192 {ram} \u041c\u0411**\nCPU: **{old_cpu} \u2192 {cpu} vCPU**\n\u0414\u0438\u0441\u043a: **{old_disk} \u2192 {disk} \u0413\u0411**"},
+    "plan.usage": {"en": "Usage: `{prefix}plan` \u2022 `{prefix}plan ram 2048` \u2022 `{prefix}plan disk 20` \u2022 `{prefix}plan cpu 2` \u2022 `{prefix}plan reset`", "ru": "\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d\u0438\u0435: `{prefix}plan` \u2022 `{prefix}plan ram 2048` \u2022 `{prefix}plan disk 20` \u2022 `{prefix}plan cpu 2` \u2022 `{prefix}plan reset`"},
+    "plan.bad_value": {"en": "Give a number, for example `{prefix}plan ram 2048`.", "ru": "\u0423\u043a\u0430\u0436\u0438\u0442\u0435 \u0447\u0438\u0441\u043b\u043e, \u043d\u0430\u043f\u0440\u0438\u043c\u0435\u0440 `{prefix}plan ram 2048`."},
+    "plan.clamped": {"en": "The value was adjusted to fit the host limits.", "ru": "\u0417\u043d\u0430\u0447\u0435\u043d\u0438\u0435 \u043f\u043e\u0434\u043e\u0433\u043d\u0430\u043d\u043e \u043f\u043e\u0434 \u043b\u0438\u043c\u0438\u0442\u044b \u0445\u043e\u0441\u0442\u0430."},
+    "plan.reset_title": {"en": "Resources reset", "ru": "\u0420\u0435\u0441\u0443\u0440\u0441\u044b \u0441\u0431\u0440\u043e\u0448\u0435\u043d\u044b"},
+    "plan.default": {"en": "default plan", "ru": "\u0442\u0430\u0440\u0438\u0444 \u043f\u043e \u0443\u043c\u043e\u043b\u0447\u0430\u043d\u0438\u044e"},
+    "plan.custom": {"en": "custom plan", "ru": "\u0438\u0437\u043c\u0435\u043d\u0451\u043d \u0430\u0434\u043c\u0438\u043d\u043e\u043c"},
+    "admin.resources": {"en": "Free VPS resources", "ru": "\u0420\u0435\u0441\u0443\u0440\u0441\u044b VPS"},
+    "admin.resources_value": {"en": "**{ram} MB** RAM \u2022 **{cpu} vCPU** \u2022 **{disk} GB** SSD \u2022 `{state}`", "ru": "**{ram} \u041c\u0411** \u041e\u0417\u0423 \u2022 **{cpu} vCPU** \u2022 **{disk} \u0413\u0411** SSD \u2022 `{state}`"},
+    "admin.btn_ram_plus": {"en": "+512 MB RAM", "ru": "+512 \u041c\u0411 \u041e\u0417\u0423"},
+    "admin.btn_ram_minus": {"en": "-512 MB RAM", "ru": "-512 \u041c\u0411 \u041e\u0417\u0423"},
+    "admin.btn_disk_plus": {"en": "+5 GB disk", "ru": "+5 \u0413\u0411 \u0434\u0438\u0441\u043a"},
+    "admin.btn_disk_minus": {"en": "-5 GB disk", "ru": "-5 \u0413\u0411 \u0434\u0438\u0441\u043a"},
+    "admin.btn_plan": {"en": "Resources", "ru": "\u0420\u0435\u0441\u0443\u0440\u0441\u044b"},
+    "help.plan": {"en": "Show / change the resources of the free plan.", "ru": "\u041f\u043e\u0441\u043c\u043e\u0442\u0440\u0435\u0442\u044c \u0438\u043b\u0438 \u0438\u0437\u043c\u0435\u043d\u0438\u0442\u044c \u0440\u0435\u0441\u0443\u0440\u0441\u044b \u0431\u0435\u0441\u043f\u043b\u0430\u0442\u043d\u043e\u0433\u043e \u0442\u0430\u0440\u0438\u0444\u0430."},
+    "manage.resources": {"en": "Resources", "ru": "\u0420\u0435\u0441\u0443\u0440\u0441\u044b"},
+    "manage.details": {"en": "Details", "ru": "\u041f\u043e\u0434\u0440\u043e\u0431\u043d\u043e\u0441\u0442\u0438"},
+    "manage.offline_hint": {"en": "The server is off \u2014 press **Start** to boot it up.", "ru": "\u0421\u0435\u0440\u0432\u0435\u0440 \u0432\u044b\u043a\u043b\u044e\u0447\u0435\u043d \u2014 \u043d\u0430\u0436\u043c\u0438\u0442\u0435 **\u0421\u0442\u0430\u0440\u0442**, \u0447\u0442\u043e\u0431\u044b \u0432\u043a\u043b\u044e\u0447\u0438\u0442\u044c."},
+    "vps.limit_title": {"en": "VPS limit reached", "ru": "\u0414\u043e\u0441\u0442\u0438\u0433\u043d\u0443\u0442 \u043b\u0438\u043c\u0438\u0442 VPS"},
+    "vps.limit": {"en": "Your account can run **{limit}** VPS and you already have **{used}**.\nUse `{prefix}manage` to control it, or `{prefix}destroy` to delete it first.", "ru": "\u041d\u0430 \u043e\u0434\u0438\u043d \u0430\u043a\u043a\u0430\u0443\u043d\u0442 \u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e **{limit}** VPS, \u0430 \u0443 \u0432\u0430\u0441 \u0443\u0436\u0435 **{used}**.\n\u041e\u0442\u043a\u0440\u043e\u0439\u0442\u0435 `{prefix}manage` \u0434\u043b\u044f \u0443\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u044f \u0438\u043b\u0438 `{prefix}destroy`, \u0447\u0442\u043e\u0431\u044b \u0443\u0434\u0430\u043b\u0438\u0442\u044c \u0442\u0435\u043a\u0443\u0449\u0438\u0439."},
     "about.title": {
         "en": "Free VPS hosting, right from Discord",
         "ru": "\u0411\u0435\u0441\u043f\u043b\u0430\u0442\u043d\u044b\u0439 VPS \u043f\u0440\u044f\u043c\u043e \u0438\u0437 Discord",

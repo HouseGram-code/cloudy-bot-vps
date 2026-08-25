@@ -12,7 +12,7 @@ load_dotenv()
 # Bot identity
 # ---------------------------------------------------------------------------
 BOT_NAME = "Cloudy VPS Bot"
-BOT_VERSION = "1.1 Beta"
+BOT_VERSION = "1.2 Beta"
 BOT_FOOTER = f"{BOT_NAME} • v{BOT_VERSION}"
 
 COMMAND_PREFIX = os.getenv("COMMAND_PREFIX", "!")
@@ -119,6 +119,11 @@ EMOJI = {
     "scroll": "\U0001F4DC",
     "hammer": "\U0001F528",
     "shield": "\U0001F6E1\ufe0f",
+    "leaf": "\U0001F343",
+    "gift": "\U0001F381",
+    "wallet": "\U0001F45B",
+    "user": "\U0001F464",
+    "id": "\U0001F194",
 }
 
 # ---------------------------------------------------------------------------
@@ -149,6 +154,18 @@ TOTAL_VPS_SLOTS = int(os.getenv("TOTAL_VPS_SLOTS", "5"))
 STATE_FILE = os.getenv("STATE_FILE", "/app/data/vps_state.json")
 BAN_FILE = os.getenv("BAN_FILE", "/app/data/bans.json")
 SLOTS_FILE = os.getenv("SLOTS_FILE", "/app/data/slots.json")
+
+# ---------------------------------------------------------------------------
+# Leaf economy ("listiki")
+# ---------------------------------------------------------------------------
+# Leaves keep a free VPS alive: a new user gets START_LEAVES, and every hour of
+# uptime costs LEAF_COST_PER_HOUR. At zero the VPS is stopped, never deleted.
+# The daily bonus gives BONUS_LEAVES once every BONUS_COOLDOWN_HOURS hours.
+START_LEAVES = int(os.getenv("START_LEAVES", "3"))
+LEAF_COST_PER_HOUR = int(os.getenv("LEAF_COST_PER_HOUR", "1"))
+BONUS_LEAVES = int(os.getenv("BONUS_LEAVES", "25"))
+BONUS_COOLDOWN_HOURS = int(os.getenv("BONUS_COOLDOWN_HOURS", "24"))
+WALLET_FILE = os.getenv("WALLET_FILE", "/app/data/wallet.json")
 
 # DNS servers given to guest containers so tmate.io always resolves.
 VPS_DNS = [s.strip() for s in os.getenv("VPS_DNS", "1.1.1.1,8.8.8.8").split(",") if s.strip()]
