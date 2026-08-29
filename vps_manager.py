@@ -695,8 +695,10 @@ class VPSManager:
         port_checks = "; ".join(
             f"echo '--- tcp {p} ---'; "
             "{ "
-            f"b=$(timeout 6 bash -c 'exec 3<>/dev/tcp/{TMATE_SERVER_HOST}/{p} "
-            "&& head -c 40 <&3' 2>/dev/null); "
+            "b=$(timeout 8 bash -c '"
+            f"exec 3<>/dev/tcp/{TMATE_SERVER_HOST}/{p} || exit 1; "
+            "printf \"SSH-2.0-cloudy_probe\\r\\n\" >&3; "
+            "head -c 60 <&3' 2>/dev/null); "
             'rc=$?; '
             'if [ "$rc" -ne 0 ]; then echo "TCP FAILED (blocked outbound)"; '
             'elif echo "$b" | grep -q "^SSH-"; then echo "TCP OK + SSH relay"; '
@@ -723,10 +725,15 @@ class VPSManager:
         burns the whole timeout there and the real error is hidden. Only a port
         that answers with an `SSH-2.0-...` banner can complete the handshake.
         """
+        # NOTE: tmate-ssh-server waits for the CLIENT identification string
+        # before sending its own banner, so a read-only probe times out even on
+        # a healthy relay. Send a version string first, then read.
         checks = "; ".join(
             "{ "
-            f"b=$(timeout 6 bash -c 'exec 3<>/dev/tcp/{TMATE_SERVER_HOST}/{p} "
-            "&& head -c 40 <&3' 2>/dev/null); "
+            "b=$(timeout 8 bash -c '"
+            f"exec 3<>/dev/tcp/{TMATE_SERVER_HOST}/{p} || exit 1; "
+            "printf \"SSH-2.0-cloudy_probe\\r\\n\" >&3; "
+            "head -c 60 <&3' 2>/dev/null); "
             'rc=$?; '
             f'if [ "$rc" -ne 0 ]; then echo "CLOSED {p}"; '
             f'elif echo "$b" | grep -q "^SSH-"; then echo "RELAY {p}"; '

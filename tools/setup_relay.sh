@@ -96,6 +96,22 @@ docker run -d --name "$RELAY_NAME" \
   -e SSH_PORT_LISTEN="$RELAY_PORT" \
   "$IMAGE" >/dev/null
 
+# Probe an SSH endpoint properly.
+#
+# IMPORTANT: tmate-ssh-server does NOT send its banner first - it waits for the
+# client identification string. A read-only probe therefore always times out on
+# a perfectly healthy relay (that is why the previous check failed even though
+# the log said "Accepting connections on :443"). We must write our own version
+# string before reading.
+ssh_probe() {  # ssh_probe <host> <port> -> prints banner, empty when none
+  local h="$1" p="$2"
+  timeout 8 bash -c "
+    exec 3<>/dev/tcp/$h/$p || exit 1
+    printf 'SSH-2.0-cloudy_probe\\r\\n' >&3
+    head -c 60 <&3
+  " 2>/dev/null || true
+}
+
 echo "==> waiting for the relay to come up"
 RELAY_UP=0
 for _ in $(seq 1 15); do
@@ -104,10 +120,11 @@ for _ in $(seq 1 15); do
     continue
   fi
   # Running is not enough: a crash-looping container is "running" between
-  # restarts. Only an SSH banner proves the relay actually serves the port.
-  B="$(timeout 5 bash -c "exec 3<>/dev/tcp/127.0.0.1/$RELAY_PORT && head -c 40 <&3" 2>/dev/null || true)"
+  # restarts. An SSH banner proves the relay actually serves the port.
+  B="$(ssh_probe 127.0.0.1 "$RELAY_PORT")"
   if [[ "$B" == SSH-* ]]; then
     RELAY_UP=1
+    echo "==> relay banner: ${B%%$'\r'*}"
     break
   fi
 done
