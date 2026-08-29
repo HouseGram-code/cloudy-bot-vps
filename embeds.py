@@ -449,9 +449,9 @@ def deploy_progress_embed(
 
 
 def deploy_success_embed(
-    info: dict, ssh_status: str, lang: str = DEFAULT_LANG
+    info: dict, access_status: str, lang: str = DEFAULT_LANG
 ) -> discord.Embed:
-    """Public success card. Never contains the SSH command."""
+    """Public success card. Never contains the access link itself."""
     embed = discord.Embed(
         title=f"{EMOJI['check']} {t(lang, 'success.title')}",
         description=t(lang, "success.desc", prefix=P),
@@ -492,36 +492,20 @@ def deploy_success_embed(
         inline=True,
     )
     embed.add_field(
-        name=f"{EMOJI['key']} {t(lang, 'success.ssh_field')}", value=ssh_status, inline=False
-    )
-    return _footer(embed)
-
-
-# ---------------------------------------------------------------------------
-# SSH (DM only)
-# ---------------------------------------------------------------------------
-def ssh_dm_embed(info: dict, ssh: str, lang: str = DEFAULT_LANG) -> discord.Embed:
-    embed = discord.Embed(
-        title=f"{EMOJI['key']} {t(lang, 'ssh.dm_title')}",
-        description=t(
-            lang, "ssh.dm_desc", name=info["name"], sid=info["short_id"], ssh=ssh
-        ),
-        color=COLOR_SUCCESS,
-    )
-    embed.add_field(
-        name=f"{EMOJI['os']} {t(lang, 'ssh.system')}",
-        value=f"{info['os']} • {info['ram_limit_mb']} MB RAM • "
-        f"{info['cpu_limit']:g} vCPU • {info['disk_gb']} GB",
-        inline=False,
-    )
-    embed.add_field(
-        name=f"{EMOJI['lock']} {t(lang, 'ssh.keep_private')}",
-        value=t(lang, "ssh.keep_private_value", prefix=P),
+        name=f"{EMOJI['web']} {t(lang, 'success.access_field')}",
+        value=access_status,
         inline=False,
     )
     return _footer(embed)
 
 
+# ---------------------------------------------------------------------------
+# Access delivery (DM only)
+#
+# NOTE: ssh_dm_embed was removed together with tmate/SSH support. This host is
+# behind provider NAT, so neither outbound TCP 2200 nor an inbound public port
+# is available; the browser terminal below needs only outbound HTTPS.
+# ---------------------------------------------------------------------------
 def sshx_dm_embed(info: dict, link: str, lang: str = DEFAULT_LANG) -> discord.Embed:
     """Browser-terminal link (sshx). The link IS the key, so DM only."""
     embed = discord.Embed(
@@ -667,14 +651,11 @@ def manage_embed(info: dict, lang: str = DEFAULT_LANG) -> discord.Embed:
         inline=True,
     )
     embed.add_field(
-        name=f"{EMOJI['key']} {t(lang, 'success.ssh_field')}",
+        name=f"{EMOJI['web']} {t(lang, 'success.access_field')}",
         value=(
-            t(lang, "manage.ssh_running")
-            + "\n"
-            + f"{EMOJI['web']} "
-            + t(lang, "manage.web_hint", prefix=P)
+            t(lang, "manage.web_running", prefix=P)
             if running
-            else t(lang, "manage.ssh_stopped")
+            else t(lang, "manage.web_stopped")
         ),
         inline=False,
     )

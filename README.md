@@ -14,8 +14,8 @@ and a button-based control panel.
 
 | Command | What it does |
 |---|---|
-| `!deploy` | Shows the free plan specs (RAM, swap, vCPU, disk, OS, bandwidth, access) with a **Start** button. Pressing Start plays an animated progress bar and then reveals the live server + tmate SSH command. |
-| `!manage` | Live control panel: status, RAM usage bar, CPU usage bar, disk, OS, network I/O, uptime, server ID + buttons **Start / Stop / Restart / Get SSH / Refresh**. |
+| `!deploy` | Shows the free plan specs (RAM, swap, vCPU, disk, OS, bandwidth, access) with a **Start** button. Pressing Start plays an animated progress bar and then reveals the live server + web-terminal link. |
+| `!manage` | Live control panel: status, RAM usage bar, CPU usage bar, disk, OS, network I/O, uptime, server ID + buttons **Start / Stop / Restart / Web terminal / Refresh**. |
 | `!rules` | The 5 rules of the free tier. |
 | `!destroy` | Permanently removes the user's VPS. |
 | `!ban <@user\|id> [reason]` | **Staff.** Blocks the user, stops their server, DMs them the reason. |
@@ -40,7 +40,7 @@ One VPS per Discord user by default (`MAX_VPS_PER_USER`).
 | CPU | 2 vCPU (`--cpus=2`) |
 | Disk | 20 GB |
 | OS | Ubuntu 22.04 LTS (Jammy) |
-| Access | tmate SSH (root) |
+| Access | sshx web terminal (root) |
 | Bandwidth | Unmetered (fair use) |
 
 All of it is configurable in `.env` **and** live-editable with `!plan` /
@@ -54,7 +54,7 @@ the buttons in `!admin` (see "Free VPS resources" below).
 cloudy-vps-bot/
 ├── bot.py                       # commands, events, error handling
 ├── config.py                    # token, plan, colors, emojis
-├── vps_manager.py               # Docker backend + tmate SSH
+├── vps_manager.py               # Docker backend + sshx web terminal
 ├── views.py                     # buttons, deploy animation
 ├── embeds.py                    # all the pretty embeds
 ├── moderation.py                # ban / unban storage (data/bans.json)
@@ -231,25 +231,25 @@ git push -f origin main
 
 ---
 
-## Two ways to connect
+## How to connect: the web terminal
 
-| | tmate SSH | sshx web terminal |
-|---|---|---|
-| Command | button `Get SSH` in `!manage` | `!sshx` or the `Web terminal` button |
-| Client | any `ssh` client | any browser |
-| Needs | outbound TCP 2200 / 22 / 443 | plain HTTPS only |
-| Looks like | `ssh nXZ...@nyc1.tmate.io` | `https://sshx.io/s/wC8cc6Mbjv#W0apHWrt8OaX4W` |
+Access is provided by **sshx**, a browser terminal. There is no SSH button.
 
-Both open the same container as `root`, and both are sent **by DM only**.
+| | sshx web terminal |
+|---|---|
+| Command | `!sshx` or the **Web terminal** button in `!manage` |
+| Client | any browser |
+| Needs | outbound HTTPS only |
+| Looks like | `https://sshx.io/s/wC8cc6Mbjv#W0apHWrt8OaX4W` |
 
-### sshx (browser terminal)
+It opens the container as `root`, and the link is sent **by DM only**.
 
 * The client is one static binary; the bot installs it inside the VPS on first
   use (official build from `sshx.s3.amazonaws.com`, with `https://sshx.io/get`
   as a fallback) and pre-installs it in the guest image.
 * It runs detached with `--shell /usr/local/bin/cloudy-login`, so the browser
-  terminal greets you with the same Cloudy banner as SSH. If a client build does
-  not know a flag, the bot retries with fewer flags instead of failing.
+  terminal greets you with the Cloudy banner. If a client build does not know a
+  flag, the bot retries with fewer flags instead of failing.
 * Everything after `#` in the link is the encryption key: it stays in the URL
   fragment, so the sshx server never sees it. **The link is the credential** -
   the bot only ever DMs it.
@@ -260,79 +260,41 @@ Both open the same container as `root`, and both are sent **by DM only**.
 
 ---
 
-## How tmate SSH works
+## Why tmate SSH was removed
 
-When a server is deployed (or you press **Get SSH**), the bot runs inside the
-guest container:
+tmate needs one of two things, and a NATed host has neither:
 
-```bash
-printf 'set -g tmate-server-host ssh.tmate.io\nset -g tmate-server-port 2200\n' > /root/.tmate.conf
-nohup tmate -f /root/.tmate.conf -S /tmp/cloudy.tmate.sock -F new-session -d 'bash -l' &
-tmate -S /tmp/cloudy.tmate.sock display -p '#{tmate_ssh}'
-```
+* **outbound TCP 2200** to `ssh.tmate.io` - the only real tmate relay port.
+  Many providers block it at the network edge, where `ufw` cannot help
+  (outbound is already allowed by default; the filter is upstream).
+* **a publicly reachable inbound port** for a self-hosted relay
+  (`tools/setup_relay.sh`). Behind provider NAT the host only has private
+  addresses (`10.x`, `172.17.x`), so there is nothing to publish. An
+  "echo my IP" service reports the NAT gateway, which belongs to someone else -
+  pointing the bot at it yields `Connection refused`.
 
-The resulting `ssh xxxxx@nyc1.tmate.io` line is sent to the user. No port
-forwarding or public IP is needed, but the host **must have outbound internet
-access** to `tmate.io`. Stopping or restarting a server invalidates its session —
-press **Get SSH** again to obtain a fresh one.
+Ports 22 and 443 on `ssh.tmate.io` accept TCP but are **not** the relay: they
+never complete the handshake, so "TCP OK" there is misleading.
 
-### Relay port fallback (fixes "Could not open a tmate session")
+sshx has neither requirement - it only dials out over HTTPS - so it works on
+exactly the hosts where tmate cannot.
 
-tmate's default relay port is TCP **2200**, which a lot of providers and host
-firewalls block outright. The bot therefore probes every port in `TMATE_PORTS`
-(default `2200,22,443`), writes a matching `/root/.tmate.conf` inside the guest,
-and keeps the first port that actually produces a session. The port that worked
-is stored in the server record (`tmate_port`).
-
-```env
-TMATE_SERVER_HOST=ssh.tmate.io
-TMATE_PORTS=2200,22,443
-# self-hosted relay only:
-# TMATE_RSA_FINGERPRINT=
-# TMATE_ED25519_FINGERPRINT=
-```
-
-If every port is blocked, the error message now lists the ports that were tried,
-the **tmate log for each attempt**, and the exact firewall commands to open one.
-
-> Important: 22 and 443 being "TCP OK" on `ssh.tmate.io` does **not** mean tmate
-> will work there — those ports are not the tmate relay, so the handshake is
-> refused. If outbound 2200 stays blocked, run your own relay (below).
-
-### Own relay when 2200 is blocked for good
-
-```bash
-RELAY_PORT=443 bash tools/setup_relay.sh    # or RELAY_PORT=8443, RELAY_HOST=vps.example.com
-./start.sh restart
-```
-
-The script starts `tmate-ssh-server` on this host on a port you choose, creates
-and reuses its host keys under `data/tmate-keys`, prints the matching
-`TMATE_SERVER_HOST` / `TMATE_PORTS` / `TMATE_RSA_FINGERPRINT` /
-`TMATE_ED25519_FINGERPRINT` values, and can append them to `.env` for you.
-Remember to open that port **inbound** (`sudo ufw allow 443/tcp`).
-
-### Fixed bug: tmate never started ("no log")
-
-The old session launcher ran `pkill -f 'tmate -S /tmp/cloudy.tmate.sock'`. That
-pattern also matches the `bash -lc "..."` process executing the script itself, so
-the shell killed itself before starting tmate — hence an empty log even when the
-network was fine. It now uses `tmate kill-server` plus the `[t]mate` bracket
-pattern, launches tmate with `setsid nohup ... </dev/null`, keeps a per-port log
-(`/tmp/cloudy.tmate.<port>.log`), and stops waiting as soon as the tmate process
-dies instead of burning the whole timeout.
+`tools/setup_relay.sh` and `tools/check_tmate.sh` are kept for hosts that do
+have a public address or an open outbound 2200.
 
 ---
 
-## Privacy: SSH only in DMs
+## Privacy: access links only in DMs
 
-SSH credentials are **never posted in a channel or group**. Whenever a session is
-created (after `!deploy` or via the **Get SSH** button) the bot sends it to the
-user's **direct messages**. The public message only says *"Sent to your DMs"*.
+The access link is **never posted in a channel or group**. Whenever a session is
+created (after `!deploy` or via the **Web terminal** button) the bot sends it to
+the user's **direct messages**. The public message only says *"Sent to your DMs"*.
 
 If the user has DMs closed, the bot falls back to an **ephemeral** reply that only
 that user can see, plus a hint to enable *Privacy Settings -> Direct Messages*.
-Set `SSH_TO_DM_ONLY=0` in `.env` to allow the ephemeral copy without the warning.
+
+Anyone holding the link gets a root shell, so treat it as a password: run
+`!sshx` again to revoke the old session and issue a fresh link.
 
 ---
 
@@ -524,8 +486,8 @@ Now the bot:
    runs a self-test inside the guest (`banner install issue …` appears in the bot log
    if something is wrong).
 
-To see it: `!manage` → **Get SSH** (a fresh key re-installs the banner), or type
-`banner` inside the VPS.
+To see it: `!manage` → **Web terminal** (a fresh session re-installs the banner),
+or type `banner` inside the VPS.
 
 ## Leaves (the free-VPS currency)
 

@@ -21,7 +21,6 @@ from config import (
     COLOR_PRIMARY,
     COMMAND_PREFIX,
     EMOJI,
-    SSH_TO_DM_ONLY,
     is_owner,
 )
 from i18n import DEFAULT_LANG, LANGUAGES, LangStore, t
@@ -42,35 +41,6 @@ from vps_manager import VPSError, VPSManager
 from wallet import MAX_GRANT, WALLET, Wallet
 
 log = logging.getLogger("cloudy.views")
-
-
-async def deliver_ssh(
-    user: discord.abc.User,
-    info: dict,
-    ssh: str,
-    interaction: discord.Interaction | None = None,
-    lang: str = DEFAULT_LANG,
-) -> bool:
-    """Send the SSH command privately. Returns True if the DM was delivered."""
-    embed = embeds.ssh_dm_embed(info, ssh, lang)
-    try:
-        await user.send(embed=embed)
-        return True
-    except (discord.Forbidden, discord.HTTPException) as exc:
-        log.warning("DM to %s failed: %s", user.id, exc)
-
-    if interaction is not None:
-        # Ephemeral fallback: still private, only this user can read it.
-        target = interaction.followup if interaction.response.is_done() else interaction.response
-        try:
-            if not SSH_TO_DM_ONLY:
-                await target.send(embed=embed, ephemeral=True)
-            else:
-                await target.send(embed=embeds.dm_failed_embed(lang), ephemeral=True)
-                await target.send(embed=embed, ephemeral=True)
-        except discord.HTTPException:
-            pass
-    return False
 
 
 async def deliver_sshx(
@@ -237,21 +207,24 @@ class DeployView(OwnerOnlyView):
 
         info = await self.manager.get_info(interaction.user.id)
 
-        # tmate session + private delivery
-        ssh_status = ""
+        # Browser terminal (sshx) + private delivery.
+        # NOTE: tmate/SSH was removed - it needs either outbound TCP 2200 or a
+        # publicly reachable inbound port, and this host has neither (it sits
+        # behind provider NAT). sshx only needs outbound HTTPS, so it works.
+        access_status = ""
         try:
-            ssh = await self.manager.get_ssh(interaction.user.id)
-            sent = await deliver_ssh(interaction.user, info, ssh, interaction, lang)
-            ssh_status = (
-                f"{EMOJI['mail']} {t(lang, 'ssh.sent_dm')}"
+            link = await self.manager.get_sshx(interaction.user.id, lang=lang)
+            sent = await deliver_sshx(interaction.user, info, link, interaction, lang)
+            access_status = (
+                f"{EMOJI['mail']} {t(lang, 'sshx.sent_dm')}"
                 if sent
-                else f"{EMOJI['lock']} {t(lang, 'ssh.sent_ephemeral')}"
+                else f"{EMOJI['lock']} {t(lang, 'sshx.sent_ephemeral')}"
             )
         except asyncio.TimeoutError:
-            ssh_status = t(lang, "ssh.slow")
+            access_status = t(lang, "sshx.slow")
         except VPSError as exc:
-            log.warning("tmate not ready: %s", exc)
-            ssh_status = t(lang, "ssh.retry")
+            log.warning("sshx not ready: %s", exc)
+            access_status = t(lang, "sshx.retry")
             try:
                 await interaction.followup.send(
                     embed=embeds.error_embed(str(exc), lang=lang), ephemeral=True
@@ -270,7 +243,8 @@ class DeployView(OwnerOnlyView):
         manage_view = ManageView(self.manager, interaction.user.id, self.bans, lang=lang)
         await manage_view.refresh_buttons(info)
         await message.edit(
-            embed=embeds.deploy_success_embed(info, ssh_status, lang), view=manage_view
+            embed=embeds.deploy_success_embed(info, access_status, lang),
+            view=manage_view,
         )
         manage_view.message = message
         self.stop()
@@ -304,7 +278,6 @@ class ManageView(OwnerOnlyView):
         "vps_start": "btn.start",
         "vps_stop": "btn.stop",
         "vps_restart": "btn.restart",
-        "vps_ssh": "btn.ssh",
         "vps_sshx": "btn.sshx",
         "vps_refresh": "btn.refresh",
         "vps_rules": "btn.rules",
@@ -329,7 +302,6 @@ class ManageView(OwnerOnlyView):
             elif child.custom_id in (
                 "vps_stop",
                 "vps_restart",
-                "vps_ssh",
                 "vps_sshx",
             ):
                 child.disabled = not running
@@ -393,42 +365,6 @@ class ManageView(OwnerOnlyView):
     )
     async def restart(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._do(interaction, "restart", "manage.restarted")
-
-    @discord.ui.button(
-        label="Get SSH",
-        style=discord.ButtonStyle.secondary,
-        emoji="\U0001F511",
-        custom_id="vps_ssh",
-        row=1,
-    )
-    async def ssh(self, interaction: discord.Interaction, button: discord.ui.Button):
-        lang = self.lang
-        await interaction.response.defer(ephemeral=True)
-        try:
-            ssh = await self.manager.get_ssh(interaction.user.id, force_new=True)
-        except asyncio.TimeoutError:
-            await interaction.followup.send(
-                embed=embeds.error_embed(t(lang, "ssh.timeout"), lang=lang),
-                ephemeral=True,
-            )
-            return
-        except VPSError as exc:
-            await interaction.followup.send(
-                embed=embeds.error_embed(str(exc), lang=lang), ephemeral=True
-            )
-            return
-
-        info = await self.manager.get_info(interaction.user.id)
-        sent = await deliver_ssh(interaction.user, info, ssh, interaction, lang)
-        if sent:
-            await interaction.followup.send(
-                embed=embeds.info_embed(
-                    f"{EMOJI['mail']} {t(lang, 'ssh.check_dms_title')}",
-                    t(lang, "ssh.check_dms_desc"),
-                    COLOR_PRIMARY,
-                ),
-                ephemeral=True,
-            )
 
     @discord.ui.button(
         label="Web terminal",
