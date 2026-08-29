@@ -22,8 +22,17 @@ RELAY_NAME="${RELAY_NAME:-cloudy-tmate-relay}"
 KEYS_DIR="${KEYS_DIR:-$PWD/data/tmate-keys}"
 IMAGE="${RELAY_IMAGE:-tmate/tmate-ssh-server:latest}"
 
-# Public address that end users will SSH to. Auto-detected if not given.
+# Public address that guests will SSH to.
+#
+# WARNING: an "echo my IP" service reports the address of whatever NAT gateway
+# or proxy your egress traffic exits through. On a NATed / proxied host that
+# address belongs to someone else entirely, and pointing the bot at it gives
+# "Connection refused". So we auto-detect only as a hint and VERIFY the address
+# afterwards against the running relay.
 RELAY_HOST="${RELAY_HOST:-}"
+RELAY_HOST_GIVEN=0
+[[ -n "$RELAY_HOST" ]] && RELAY_HOST_GIVEN=1
+
 if [[ -z "$RELAY_HOST" ]]; then
   RELAY_HOST="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
 fi
@@ -163,11 +172,37 @@ if [[ -z "$RSA_FP" || -z "$ED_FP" ]]; then
   ED_FP="${ED_FP:-$(docker logs "$RELAY_NAME" 2>&1 | grep -oE 'SHA256:[A-Za-z0-9+/=]+' | sed -n 2p || true)}"
 fi
 
-# Warn if the auto-detected address is not actually bound on this host: behind
-# NAT, ipify returns the gateway address and guests could not reach the relay.
-if ! ip -4 addr show 2>/dev/null | grep -qw "$RELAY_HOST"; then
-  echo "note: $RELAY_HOST is not bound locally (NAT?). Make sure TCP $RELAY_PORT"
-  echo "      is forwarded to this host, or re-run with RELAY_HOST=<reachable ip>."
+# ---------------------------------------------------------------------------
+# Verify that $RELAY_HOST really points at THIS relay.
+#
+# The relay is confirmed working on 127.0.0.1 by now. If the same port on
+# $RELAY_HOST does not answer with the tmate banner, that address is not us -
+# writing it into .env would only produce "Connection refused" in the bot.
+# ---------------------------------------------------------------------------
+echo -n "==> checking that $RELAY_HOST:$RELAY_PORT reaches this relay : "
+PUB="$(ssh_probe "$RELAY_HOST" "$RELAY_PORT")"
+if [[ "$PUB" == SSH-* ]]; then
+  echo "OK"
+else
+  echo "UNREACHABLE"
+  echo
+  echo "!! $RELAY_HOST does not reach the relay running on this host." >&2
+  if [[ "$RELAY_HOST_GIVEN" -eq 0 ]]; then
+    echo "   That address came from api.ipify.org, which reports the NAT gateway" >&2
+    echo "   or proxy your traffic exits through - not necessarily your server." >&2
+  fi
+  echo >&2
+  echo "   Addresses actually bound on this host:" >&2
+  ip -4 addr show scope global 2>/dev/null | awk '/inet /{print "     " $2}' >&2 || true
+  echo >&2
+  echo "   Re-run with an address your guests can reach, e.g.:" >&2
+  echo "     RELAY_HOST=<public-ip-or-domain> RELAY_PORT=$RELAY_PORT bash tools/setup_relay.sh" >&2
+  echo >&2
+  echo "   Also confirm inbound TCP $RELAY_PORT is open in your provider panel" >&2
+  echo "   (AWS security group / firewall), not just in ufw." >&2
+  echo >&2
+  echo "   Nothing was written to .env, so the bot keeps its current settings." >&2
+  exit 1
 fi
 
 echo
