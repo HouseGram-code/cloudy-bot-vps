@@ -45,11 +45,37 @@ mkdir -p "$KEYS_DIR"
 docker pull "$IMAGE"
 
 # Host keys for the relay (generated once, reused afterwards).
-if [[ ! -f "$KEYS_DIR/ssh_host_ed25519_key" ]]; then
+#
+# NOTE: the tmate/tmate-ssh-server image does NOT ship create_keys.sh, so the
+# old call failed with "/usr/bin/create_keys.sh: not found" and, under `set -e`,
+# aborted the whole script before the relay was ever started. Generate the two
+# host keys ourselves with ssh-keygen instead.
+gen_keys() {
+  if command -v ssh-keygen >/dev/null 2>&1; then
+    ssh-keygen -q -t rsa -b 2048 -N "" -f "$KEYS_DIR/ssh_host_rsa_key"
+    ssh-keygen -q -t ed25519      -N "" -f "$KEYS_DIR/ssh_host_ed25519_key"
+  else
+    # No ssh-keygen on the host - borrow one from a throwaway container.
+    docker run --rm -v "$KEYS_DIR:/keys" --entrypoint /bin/sh alpine:3 -c '
+      apk add --no-cache openssh-keygen >/dev/null 2>&1 || apk add --no-cache openssh >/dev/null 2>&1
+      ssh-keygen -q -t rsa -b 2048 -N "" -f /keys/ssh_host_rsa_key
+      ssh-keygen -q -t ed25519      -N "" -f /keys/ssh_host_ed25519_key
+    '
+  fi
+}
+
+if [[ ! -f "$KEYS_DIR/ssh_host_ed25519_key" || ! -f "$KEYS_DIR/ssh_host_rsa_key" ]]; then
   echo "==> generating relay host keys"
-  docker run --rm -v "$KEYS_DIR:/keys" --entrypoint /bin/sh "$IMAGE" \
-    -c 'create_keys.sh /keys >/dev/null 2>&1 || /usr/bin/create_keys.sh /keys'
+  rm -f "$KEYS_DIR"/ssh_host_rsa_key* "$KEYS_DIR"/ssh_host_ed25519_key*
+  gen_keys
 fi
+
+if [[ ! -f "$KEYS_DIR/ssh_host_ed25519_key" || ! -f "$KEYS_DIR/ssh_host_rsa_key" ]]; then
+  echo "!! Could not generate the relay host keys in $KEYS_DIR" >&2
+  echo "   Install openssh-client (sudo apt-get install -y openssh-client) and retry." >&2
+  exit 1
+fi
+chmod 600 "$KEYS_DIR"/ssh_host_rsa_key "$KEYS_DIR"/ssh_host_ed25519_key
 
 docker rm -f "$RELAY_NAME" >/dev/null 2>&1 || true
 docker run -d --name "$RELAY_NAME" \
@@ -64,14 +90,31 @@ echo "==> waiting for the relay to come up"
 sleep 5
 docker logs "$RELAY_NAME" 2>&1 | tail -n 20 || true
 
-# tmate prints the fingerprints it expects clients to pin.
-RSA_FP="$(docker logs "$RELAY_NAME" 2>&1 | grep -oE 'SHA256:[A-Za-z0-9+/=]+' | head -1 || true)"
-ED_FP="$(docker logs "$RELAY_NAME" 2>&1 | grep -oE 'SHA256:[A-Za-z0-9+/=]+' | sed -n 2p || true)"
+if [[ "$(docker inspect -f '{{.State.Running}}' "$RELAY_NAME" 2>/dev/null)" != "true" ]]; then
+  echo "!! The relay container is not running. Last log lines:" >&2
+  docker logs "$RELAY_NAME" 2>&1 | tail -n 40 >&2 || true
+  exit 1
+fi
 
-if [[ -z "$RSA_FP" ]]; then
-  # Fall back to computing them from the key files.
-  RSA_FP="$(ssh-keygen -lf "$KEYS_DIR/ssh_host_rsa_key.pub" 2>/dev/null | awk '{print $2}')"
-  ED_FP="$(ssh-keygen -lf "$KEYS_DIR/ssh_host_ed25519_key.pub" 2>/dev/null | awk '{print $2}')"
+# Fingerprints that tmate clients pin. Compute them from the key files: that is
+# authoritative, while the relay log format changes between image versions.
+RSA_FP="$(ssh-keygen -l -E sha256 -f "$KEYS_DIR/ssh_host_rsa_key.pub" 2>/dev/null | awk '{print $2}')"
+ED_FP="$(ssh-keygen -l -E sha256 -f "$KEYS_DIR/ssh_host_ed25519_key.pub" 2>/dev/null | awk '{print $2}')"
+
+if [[ -z "$RSA_FP" || -z "$ED_FP" ]]; then
+  # Last resort: scrape whatever the relay printed.
+  RSA_FP="${RSA_FP:-$(docker logs "$RELAY_NAME" 2>&1 | grep -oE 'SHA256:[A-Za-z0-9+/=]+' | head -1 || true)}"
+  ED_FP="${ED_FP:-$(docker logs "$RELAY_NAME" 2>&1 | grep -oE 'SHA256:[A-Za-z0-9+/=]+' | sed -n 2p || true)}"
+fi
+
+# Verify the relay actually answers with an SSH banner on the chosen port.
+echo -n "==> relay handshake check on port $RELAY_PORT : "
+BANNER="$(timeout 8 bash -c "exec 3<>/dev/tcp/127.0.0.1/$RELAY_PORT && head -c 40 <&3" 2>/dev/null || true)"
+if [[ "$BANNER" == SSH-* ]]; then
+  echo "OK ($BANNER)"
+else
+  echo "NO SSH BANNER YET - check the relay log below"
+  docker logs "$RELAY_NAME" 2>&1 | tail -n 20 >&2 || true
 fi
 
 echo

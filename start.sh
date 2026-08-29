@@ -45,7 +45,11 @@ case "${1:-up}" in
     $DC down
     ;;
   restart)
-    $DC restart
+    # NOTE: `docker compose restart` restarts the SAME container and does NOT
+    # re-read .env, so edited TMATE_* values were silently ignored and the bot
+    # kept using the old relay settings. Recreate the container instead.
+    $DC up -d --force-recreate
+    $DC ps
     ;;
   *)
     echo "Usage: ./start.sh [up|logs|stop|restart]" >&2
