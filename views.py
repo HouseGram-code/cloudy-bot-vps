@@ -147,7 +147,7 @@ DEPLOY_STAGES: list[tuple[str, int, str]] = [
     ("stage.boot", 52, "\u001b[0;36m[boot]\u001b[0m kernel handoff \u2192 init"),
     ("stage.net", 66, "\u001b[0;36m[net]\u001b[0m bridge attached, DNS ready"),
     ("stage.apt", 78, "\u001b[0;36m[apt]\u001b[0m curl git htop python3 tmux"),
-    ("stage.tmate", 90, "\u001b[0;36m[tmate]\u001b[0m negotiating secure tunnel"),
+    ("stage.tmate", 90, "\u001b[0;36m[shell]\u001b[0m terminal service ready"),
     ("stage.health", 97, "\u001b[0;32m[ok]\u001b[0m all services healthy"),
 ]
 
@@ -207,30 +207,10 @@ class DeployView(OwnerOnlyView):
 
         info = await self.manager.get_info(interaction.user.id)
 
-        # Browser terminal (sshx) + private delivery.
-        # NOTE: tmate/SSH was removed - it needs either outbound TCP 2200 or a
-        # publicly reachable inbound port, and this host has neither (it sits
-        # behind provider NAT). sshx only needs outbound HTTPS, so it works.
-        access_status = ""
-        try:
-            link = await self.manager.get_sshx(interaction.user.id, lang=lang)
-            sent = await deliver_sshx(interaction.user, info, link, interaction, lang)
-            access_status = (
-                f"{EMOJI['mail']} {t(lang, 'sshx.sent_dm')}"
-                if sent
-                else f"{EMOJI['lock']} {t(lang, 'sshx.sent_ephemeral')}"
-            )
-        except asyncio.TimeoutError:
-            access_status = t(lang, "sshx.slow")
-        except VPSError as exc:
-            log.warning("sshx not ready: %s", exc)
-            access_status = t(lang, "sshx.retry")
-            try:
-                await interaction.followup.send(
-                    embed=embeds.error_embed(str(exc), lang=lang), ephemeral=True
-                )
-            except discord.HTTPException:
-                pass
+        # Deploy just hands over the server and its buttons. Opening a terminal
+        # is a separate, explicit action, so a slow or failing session can no
+        # longer delay or spoil the deployment result.
+        access_status = t(lang, "access.press_button")
 
         await message.edit(
             embed=embeds.deploy_progress_embed(
