@@ -36,9 +36,19 @@ echo "==> relay host : $RELAY_HOST"
 echo "==> relay port : $RELAY_PORT"
 echo "==> keys dir   : $KEYS_DIR"
 
+# Port check. Our OWN relay from a previous run holds this port, and that is
+# fine - we recreate it below. Only a foreign listener is a real conflict.
 if ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${RELAY_PORT}\$"; then
-  echo "!! Port $RELAY_PORT is already in use on this host. Pick another with RELAY_PORT=..." >&2
-  exit 1
+  if [[ "$(docker inspect -f '{{.State.Running}}' "$RELAY_NAME" 2>/dev/null)" == "true" ]]; then
+    echo "==> port $RELAY_PORT is held by our own relay ($RELAY_NAME) - recreating it"
+    docker rm -f "$RELAY_NAME" >/dev/null 2>&1 || true
+    sleep 1
+  else
+    echo "!! Port $RELAY_PORT is already in use by another process:" >&2
+    ss -ltnp 2>/dev/null | grep -E "[:.]${RELAY_PORT}\b" >&2 || true
+    echo "   Free it, or pick another port with RELAY_PORT=..." >&2
+    exit 1
+  fi
 fi
 
 mkdir -p "$KEYS_DIR"
