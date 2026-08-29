@@ -78,23 +78,52 @@ fi
 chmod 600 "$KEYS_DIR"/ssh_host_rsa_key "$KEYS_DIR"/ssh_host_ed25519_key
 
 docker rm -f "$RELAY_NAME" >/dev/null 2>&1 || true
+
+# NOTE: this image is driven by ENVIRONMENT VARIABLES, not by CLI flags.
+# Passing `-h/-p/-k` sends them to the image entrypoint, which does not
+# understand them: it printed "sh: out of range" and then started the server
+# with no key path at all, hence
+#   "fatal: Error listening to socket: ECDSA, ED25519, DSA, or RSA host key
+#    file must be set".
+# SSH_KEYS_PATH / SSH_HOSTNAME / SSH_PORT_LISTEN are the supported knobs.
 docker run -d --name "$RELAY_NAME" \
   --restart unless-stopped \
   --cap-add SYS_ADMIN \
   -p "${RELAY_PORT}:${RELAY_PORT}" \
   -v "$KEYS_DIR:/etc/tmate-ssh-server-keys" \
-  "$IMAGE" \
-  -h "$RELAY_HOST" -p "$RELAY_PORT" -k /etc/tmate-ssh-server-keys >/dev/null
+  -e SSH_KEYS_PATH=/etc/tmate-ssh-server-keys \
+  -e SSH_HOSTNAME="$RELAY_HOST" \
+  -e SSH_PORT_LISTEN="$RELAY_PORT" \
+  "$IMAGE" >/dev/null
 
 echo "==> waiting for the relay to come up"
-sleep 5
+RELAY_UP=0
+for _ in $(seq 1 15); do
+  sleep 2
+  if [[ "$(docker inspect -f '{{.State.Running}}' "$RELAY_NAME" 2>/dev/null)" != "true" ]]; then
+    continue
+  fi
+  # Running is not enough: a crash-looping container is "running" between
+  # restarts. Only an SSH banner proves the relay actually serves the port.
+  B="$(timeout 5 bash -c "exec 3<>/dev/tcp/127.0.0.1/$RELAY_PORT && head -c 40 <&3" 2>/dev/null || true)"
+  if [[ "$B" == SSH-* ]]; then
+    RELAY_UP=1
+    break
+  fi
+done
+
 docker logs "$RELAY_NAME" 2>&1 | tail -n 20 || true
 
-if [[ "$(docker inspect -f '{{.State.Running}}' "$RELAY_NAME" 2>/dev/null)" != "true" ]]; then
-  echo "!! The relay container is not running. Last log lines:" >&2
+if [[ "$RELAY_UP" -ne 1 ]]; then
+  echo >&2
+  echo "!! The relay never answered with an SSH banner on port $RELAY_PORT." >&2
+  echo "   Full relay log:" >&2
   docker logs "$RELAY_NAME" 2>&1 | tail -n 40 >&2 || true
+  echo >&2
+  echo "   Nothing was written to .env, so the bot keeps its current settings." >&2
   exit 1
 fi
+echo "==> relay is up and serving SSH on $RELAY_PORT"
 
 # Fingerprints that tmate clients pin. Compute them from the key files: that is
 # authoritative, while the relay log format changes between image versions.
@@ -107,14 +136,11 @@ if [[ -z "$RSA_FP" || -z "$ED_FP" ]]; then
   ED_FP="${ED_FP:-$(docker logs "$RELAY_NAME" 2>&1 | grep -oE 'SHA256:[A-Za-z0-9+/=]+' | sed -n 2p || true)}"
 fi
 
-# Verify the relay actually answers with an SSH banner on the chosen port.
-echo -n "==> relay handshake check on port $RELAY_PORT : "
-BANNER="$(timeout 8 bash -c "exec 3<>/dev/tcp/127.0.0.1/$RELAY_PORT && head -c 40 <&3" 2>/dev/null || true)"
-if [[ "$BANNER" == SSH-* ]]; then
-  echo "OK ($BANNER)"
-else
-  echo "NO SSH BANNER YET - check the relay log below"
-  docker logs "$RELAY_NAME" 2>&1 | tail -n 20 >&2 || true
+# Warn if the auto-detected address is not actually bound on this host: behind
+# NAT, ipify returns the gateway address and guests could not reach the relay.
+if ! ip -4 addr show 2>/dev/null | grep -qw "$RELAY_HOST"; then
+  echo "note: $RELAY_HOST is not bound locally (NAT?). Make sure TCP $RELAY_PORT"
+  echo "      is forwarded to this host, or re-run with RELAY_HOST=<reachable ip>."
 fi
 
 echo
