@@ -24,17 +24,24 @@ if getent hosts "$TMATE_HOST" >/dev/null 2>&1; then echo "OK"; else echo "FAILED
 OPEN_HOST=""
 for p in $PORT_LIST; do
   printf 'TCP %-5s        : ' "$p"
-  if timeout 6 bash -c "</dev/tcp/$TMATE_HOST/$p" 2>/dev/null; then
-    echo "OK"
+  BANNER=$(timeout 6 bash -c "exec 3<>/dev/tcp/$TMATE_HOST/$p && head -c 40 <&3" 2>/dev/null)
+  if [[ $? -ne 0 ]]; then
+    echo "BLOCKED (no outbound route)"
+  elif [[ "$BANNER" == SSH-* ]]; then
+    echo "OK - real tmate relay"
     OPEN_HOST="$OPEN_HOST $p"
   else
-    echo "BLOCKED"
+    echo "TCP open but NO SSH banner - not a tmate relay"
   fi
 done
 if [[ -z "${OPEN_HOST// /}" ]]; then
-  echo "!! Every relay port is blocked on the host. Open at least one, e.g.:"
-  echo "     sudo ufw allow out 2200/tcp   # or 22/tcp, 443/tcp"
-  echo "     sudo iptables -A OUTPUT -p tcp --dport 2200 -j ACCEPT"
+  echo "!! No real tmate relay is reachable from this host."
+  echo "   TCP 2200 is the only true relay port on ssh.tmate.io; 22/443 accept"
+  echo "   TCP but send no SSH banner, so the handshake can never complete."
+  echo "   'ufw allow out 2200/tcp' does nothing if outbound is already allowed"
+  echo "   by default - the block is upstream (provider egress filter)."
+  echo "   Either ask the provider to open outbound TCP 2200, or run your own:"
+  echo "     RELAY_PORT=443 bash tools/setup_relay.sh"
 fi
 echo -n "Guest image      : "
 if docker image inspect "$IMAGE" >/dev/null 2>&1; then echo "$IMAGE present"; else echo "MISSING - run: docker build -t $IMAGE ./images/ubuntu-22.04"; fi
@@ -59,7 +66,10 @@ docker exec -e TMATE_HOST="$TMATE_HOST" -e PORT_LIST="$PORT_LIST" "$CONTAINER" b
   echo -n "DNS $TMATE_HOST : "; getent hosts "$TMATE_HOST" >/dev/null 2>&1 && echo OK || echo FAILED
   for p in $PORT_LIST; do
     printf "TCP %-5s        : " "$p"
-    timeout 6 bash -c "</dev/tcp/$TMATE_HOST/$p" 2>/dev/null && echo OK || echo BLOCKED
+    b=$(timeout 6 bash -c "exec 3<>/dev/tcp/$TMATE_HOST/$p && head -c 40 <&3" 2>/dev/null)
+    if [ $? -ne 0 ]; then echo "BLOCKED"
+    elif echo "$b" | grep -q "^SSH-"; then echo "OK - real tmate relay"
+    else echo "TCP open but NO SSH banner - not a tmate relay"; fi
   done
   echo "--- tmate config ---"
   cat /root/.tmate.conf 2>/dev/null || echo "no /root/.tmate.conf yet"

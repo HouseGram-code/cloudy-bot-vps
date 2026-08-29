@@ -691,10 +691,17 @@ class VPSManager:
             )
 
     def _network_diagnostics(self, container) -> str:
+        # Report the SSH banner too: an open TCP port is not proof of a relay.
         port_checks = "; ".join(
             f"echo '--- tcp {p} ---'; "
-            f"(timeout 6 bash -c '</dev/tcp/{TMATE_SERVER_HOST}/{p}' "
-            "&& echo 'TCP OK' || echo 'TCP FAILED')"
+            "{ "
+            f"b=$(timeout 6 bash -c 'exec 3<>/dev/tcp/{TMATE_SERVER_HOST}/{p} "
+            "&& head -c 40 <&3' 2>/dev/null); "
+            'rc=$?; '
+            'if [ "$rc" -ne 0 ]; then echo "TCP FAILED (blocked outbound)"; '
+            'elif echo "$b" | grep -q "^SSH-"; then echo "TCP OK + SSH relay"; '
+            'else echo "TCP OK but NO SSH banner (not a tmate relay)"; fi; '
+            "}"
             for p in TMATE_PORTS
         )
         checks = (
@@ -707,23 +714,45 @@ class VPSManager:
         return (out or err or "no diagnostics").strip()
 
     # -- relay port handling -------------------------------------------
-    def _reachable_ports(self, container) -> list[int]:
-        """Return the tmate relay ports the guest can actually reach."""
-        probe = "; ".join(
-            f"(timeout 5 bash -c '</dev/tcp/{TMATE_SERVER_HOST}/{p}' "
-            f"&& echo 'OPEN {p}') 2>/dev/null"
+    def _probe_ports(self, container) -> dict[int, str]:
+        """Classify every relay port: 'relay', 'no-ssh', or 'closed'.
+
+        A plain TCP connect is NOT enough. `ssh.tmate.io` accepts TCP on 22
+        and 443 on most nodes, but those are not the tmate relay: 22 drops the
+        connection immediately and 443 never sends an SSH banner, so tmate
+        burns the whole timeout there and the real error is hidden. Only a port
+        that answers with an `SSH-2.0-...` banner can complete the handshake.
+        """
+        checks = "; ".join(
+            "{ "
+            f"b=$(timeout 6 bash -c 'exec 3<>/dev/tcp/{TMATE_SERVER_HOST}/{p} "
+            "&& head -c 40 <&3' 2>/dev/null); "
+            'rc=$?; '
+            f'if [ "$rc" -ne 0 ]; then echo "CLOSED {p}"; '
+            f'elif echo "$b" | grep -q "^SSH-"; then echo "RELAY {p}"; '
+            f'else echo "NOSSH {p}"; fi; '
+            "}"
             for p in TMATE_PORTS
         )
-        _, out, _ = self._exec(container, probe)
-        open_ports = [
-            int(line.split()[1])
-            for line in out.splitlines()
-            if line.strip().startswith("OPEN ")
-        ]
-        # Keep the configured priority order; if nothing looks open we still
-        # try every port, because some firewalls only block the probe.
-        ordered = [p for p in TMATE_PORTS if p in open_ports]
-        return ordered or list(TMATE_PORTS)
+        _, out, _ = self._exec(container, checks)
+
+        kinds = {"RELAY": "relay", "NOSSH": "no-ssh", "CLOSED": "closed"}
+        result: dict[int, str] = {}
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[0] in kinds and parts[1].isdigit():
+                result[int(parts[1])] = kinds[parts[0]]
+        return {p: result.get(p, "closed") for p in TMATE_PORTS}
+
+    def _reachable_ports(self, container) -> list[int]:
+        """Relay ports worth trying, best first."""
+        probe = self._probe_ports(container)
+        relay = [p for p in TMATE_PORTS if probe.get(p) == "relay"]
+        if relay:
+            return relay
+        # Nothing answered like an SSH relay. Still try the ports that at least
+        # opened, because a few firewalls block only the probe itself.
+        return [p for p in TMATE_PORTS if probe.get(p) != "closed"] or list(TMATE_PORTS)
 
     def _write_tmate_conf(self, container, port: int) -> None:
         """Point tmate at the relay host/port that we want to use."""
@@ -993,7 +1022,10 @@ class VPSManager:
 
         # The default relay port (2200) is blocked on a lot of hosts, so try
         # every configured port and keep the first one that produces a session.
-        candidates = self._reachable_ports(container)
+        probe = self._probe_ports(container)
+        candidates = [p for p in TMATE_PORTS if probe.get(p) == "relay"] or [
+            p for p in TMATE_PORTS if probe.get(p) != "closed"
+        ] or list(TMATE_PORTS)
         budget = max(20.0, float(TMATE_TIMEOUT - 10))
         per_port = max(15.0, budget / max(1, len(candidates)))
 
@@ -1017,18 +1049,43 @@ class VPSManager:
             diag = self._network_diagnostics(container)
             tried = ", ".join(str(p) for p in candidates)
             fail_log = "\n".join(failures)[-700:]
+
+            port_report = ", ".join(
+                f"{p}: "
+                + {
+                    "relay": "tmate relay reachable",
+                    "no-ssh": "TCP opens but no SSH banner (not a tmate relay)",
+                    "closed": "blocked outbound",
+                }[probe.get(p, "closed")]
+                for p in TMATE_PORTS
+            )
+
+            if not any(k == "relay" for k in probe.values()):
+                cause = (
+                    "**No reachable tmate relay.** TCP 2200 is the only real relay "
+                    f"port on `{TMATE_SERVER_HOST}`, and it is blocked outbound from "
+                    "this host. Ports 22 and 443 accept TCP but send no SSH banner, "
+                    "so the handshake can never finish there.\n"
+                    "`ufw allow out 2200/tcp` does not help when outbound is already "
+                    "allowed by default — the block is upstream (provider / datacenter "
+                    "egress filter).\n"
+                    "Fix it one of two ways:\n"
+                    "\u2022 ask the provider to open outbound TCP 2200, or\n"
+                    "\u2022 run your own relay on an allowed port: "
+                    "`RELAY_PORT=443 bash tools/setup_relay.sh`, then put the printed "
+                    "`TMATE_*` values in `.env` and restart the bot.\n"
+                    "Meanwhile the browser terminal (sshx) still works."
+                )
+            else:
+                cause = (
+                    f"The relay on `{TMATE_SERVER_HOST}` answered but the session "
+                    f"did not start on TCP **{tried}**. See the log below."
+                )
+
             raise VPSError(
                 "**Could not open a tmate session.**\n"
-                f"Tried `{TMATE_SERVER_HOST}` on TCP **{tried}** — none of them "
-                "completed the tmate handshake.\n"
-                "Most common causes:\n"
-                "\u2022 the relay port (2200) is blocked outbound → "
-                "`sudo ufw allow out 2200/tcp` "
-                "(or `sudo iptables -A OUTPUT -p tcp --dport 2200 -j ACCEPT`)\n"
-                "\u2022 only 22/443 are open, but those ports on `ssh.tmate.io` are "
-                "not the tmate relay, so the handshake is refused → run your own "
-                "relay on an allowed port with `bash tools/setup_relay.sh` and put "
-                "the printed `TMATE_*` values in `.env`.\n"
+                f"{cause}\n"
+                f"Port probe: `{port_report}`\n"
                 f"```\n{fail_log or 'no tmate output'}\n```\n"
                 f"```\n{diag[-700:]}\n```"
             )
