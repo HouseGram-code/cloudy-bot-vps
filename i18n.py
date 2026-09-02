@@ -934,11 +934,11 @@ _V13B_STRINGS: dict[str, dict[str, str]] = {
     "givevps.next_value": {
         "en": (
             "The owner got a DM with the control panel.\n"
-            "`{prefix}manage` • `{prefix}specs` • `{prefix}ssh`"
+            "`{prefix}manage` • `{prefix}specs` • `{prefix}sshx`"
         ),
         "ru": (
             "Владельцу ушло личное сообщение с панелью управления.\n"
-            "`{prefix}manage` • `{prefix}specs` • `{prefix}ssh`"
+            "`{prefix}manage` • `{prefix}specs` • `{prefix}sshx`"
         ),
     },
     "givevps.no_dm": {
@@ -949,11 +949,11 @@ _V13B_STRINGS: dict[str, dict[str, str]] = {
     "givevps.notice": {
         "en": (
             "Staff handed you **`{name}`** — Ubuntu 22.04 LTS.\n"
-            "Use the buttons below, or `{prefix}manage` • `{prefix}specs` • `{prefix}ssh`."
+            "Use the buttons below, or `{prefix}manage` • `{prefix}specs` • `{prefix}sshx`."
         ),
         "ru": (
             "Стафф выдал тебе **`{name}`** — Ubuntu 22.04 LTS.\n"
-            "Жми кнопки ниже или пиши `{prefix}manage` • `{prefix}specs` • `{prefix}ssh`."
+            "Жми кнопки ниже или пиши `{prefix}manage` • `{prefix}specs` • `{prefix}sshx`."
         ),
     },
     "givevps.failed": {
@@ -979,3 +979,265 @@ _V13B_STRINGS: dict[str, dict[str, str]] = {
 for _key, _entry in _V13B_STRINGS.items():
     STRINGS.setdefault(_key, _entry)
 
+
+# ---------------------------------------------------------------------------
+# 1.4 Beta (dev): regions, servers panel, service status, abuse guard
+# ---------------------------------------------------------------------------
+_V14B_STRINGS: dict[str, dict[str, str]] = {
+    # --- wizard ------------------------------------------------------------
+    "wizard.step": {"en": "Step {step} of {total}", "ru": "Шаг {step} из {total}"},
+    "btn.back": {"en": "Back", "ru": "Назад"},
+    "btn.deploy": {"en": "Deploy", "ru": "Создать"},
+    "btn.refresh_loc": {"en": "Refresh ping", "ru": "Обновить пинг"},
+    "btn.delete": {"en": "Delete server", "ru": "Удалить сервер"},
+    "btn.delete_yes": {"en": "Yes, delete", "ru": "Да, удалить"},
+    "btn.servers": {"en": "My servers", "ru": "Мои серверы"},
+    # --- regions -----------------------------------------------------------
+    "loc.status_ok": {"en": "Normal", "ru": "Норма"},
+    "loc.status_load": {"en": "Under load", "ru": "Нагрузка"},
+    "loc.status_down": {"en": "Unavailable", "ru": "Недоступна"},
+    "loc.title": {"en": "Choose a location", "ru": "Выбери локацию"},
+    "loc.desc": {
+        "en": (
+            "{user}, pick the region your free server will live in.\n"
+            "**{open}** of **{count}** regions are open right now."
+        ),
+        "ru": (
+            "{user}, выбери регион, в котором будет жить твой бесплатный сервер.\n"
+            "Сейчас открыто **{open}** из **{count}** локаций."
+        ),
+    },
+    "loc.field": {"en": "Regions", "ru": "Локации"},
+    "loc.picker": {"en": "Select a region…", "ru": "Выбери регион…"},
+    "loc.legend_field": {"en": "How to read it", "ru": "Как читать"},
+    "loc.legend": {
+        "en": (
+            "🟩 normal — low ping, capacity free\n"
+            "🟨 under load — higher ping or filling up\n"
+            "🟥 unavailable — saturated, opens again in 5–15 min"
+        ),
+        "ru": (
+            "🟩 норма — низкий пинг, места есть\n"
+            "🟨 нагрузка — пинг выше или регион заполняется\n"
+            "🟥 недоступна — перегружена, откроется через 5–15 мин"
+        ),
+    },
+    "loc.free": {"en": "{free}/{total} free", "ru": "{free}/{total} свободно"},
+    "loc.reopen": {
+        "en": "opens in ~{minutes} min",
+        "ru": "откроется через ~{minutes} мин",
+    },
+    "loc.ping_value": {"en": "Ping `{ping} ms`", "ru": "Пинг `{ping} мс`"},
+    "loc.unavailable_title": {
+        "en": "That region is busy",
+        "ru": "Локация перегружена",
+    },
+    "loc.unavailable": {
+        "en": (
+            "**{loc}** is saturated right now and opens again in about "
+            "**{minutes} min**. Pick another region or press *Refresh ping*."
+        ),
+        "ru": (
+            "**{loc}** сейчас перегружена, откроется примерно через "
+            "**{minutes} мин**. Выбери другой регион или нажми «Обновить пинг»."
+        ),
+    },
+    "loc.chosen": {"en": "Location", "ru": "Локация"},
+    "loc.refreshed": {
+        "en": "Ping re-measured for all five regions.",
+        "ru": "Пинг заново измерен по всем пяти регионам.",
+    },
+    "loc.all_closed": {
+        "en": "Every region is saturated right now — they reopen within 5–15 minutes.",
+        "ru": "Все регионы сейчас перегружены — они открываются в течение 5–15 минут.",
+    },
+    # --- OS picker ---------------------------------------------------------
+    "os.title": {"en": "Choose the system", "ru": "Выбери систему"},
+    "os.desc": {
+        "en": "Region **{loc}** selected. Now pick the Ubuntu release.",
+        "ru": "Локация **{loc}** выбрана. Теперь выбери версию Ubuntu.",
+    },
+    "os.field": {"en": "Available images", "ru": "Доступные образы"},
+    "os.picker": {"en": "Select an Ubuntu release…", "ru": "Выбери версию Ubuntu…"},
+    "os.recommended": {"en": "recommended", "ru": "рекомендуем"},
+    "os.soon": {"en": "coming soon", "ru": "скоро"},
+    "os.unavailable_title": {"en": "Image not ready", "ru": "Образ пока не готов"},
+    "os.unavailable": {
+        "en": "**{os}** is not built on this host yet. Ubuntu 22.04 LTS is ready now.",
+        "ru": "**{os}** ещё не собран на этом хосте. Ubuntu 22.04 LTS доступна сейчас.",
+    },
+    "os.chosen": {"en": "System", "ru": "Система"},
+    # --- confirm step ------------------------------------------------------
+    "confirm.title": {"en": "Ready to deploy", "ru": "Всё готово к созданию"},
+    "confirm.desc": {
+        "en": (
+            "**{os}** in **{loc}** \u00b7 ping `{ping} ms`\n"
+            "Press **Deploy** and the machine is yours for **{days} days**, free."
+        ),
+        "ru": (
+            "**{os}** в локации **{loc}** \u00b7 пинг `{ping} мс`\n"
+            "Жми **Создать** — машина твоя на **{days} дней**, бесплатно."
+        ),
+    },
+    "stage.region": {
+        "en": "Reserving capacity in {loc}…",
+        "ru": "Резервируем мощности в {loc}…",
+    },
+    # --- deploy switch (staff) --------------------------------------------
+    "lock.closed_title": {"en": "Deployments are closed", "ru": "Создание серверов закрыто"},
+    "lock.closed_desc": {
+        "en": (
+            "Staff temporarily closed `{prefix}deploy`. Existing servers keep "
+            "running — `{prefix}manage`, `{prefix}sshx` and `{prefix}status` work as usual."
+        ),
+        "ru": (
+            "Стафф временно закрыл `{prefix}deploy`. Уже созданные серверы работают — "
+            "`{prefix}manage`, `{prefix}sshx` и `{prefix}status` доступны как обычно."
+        ),
+    },
+    "lock.reason": {"en": "Reason", "ru": "Причина"},
+    "lock.no_reason": {"en": "maintenance of the host", "ru": "обслуживание хоста"},
+    "lock.until": {"en": "Opens again", "ru": "Откроется снова"},
+    "lock.until_value": {"en": "in ~{minutes} min", "ru": "через ~{minutes} мин"},
+    "lock.manual": {"en": "when staff opens it", "ru": "когда стафф откроет"},
+    "lock.state_open": {"en": "open", "ru": "открыто"},
+    "lock.state_closed": {"en": "closed", "ru": "закрыто"},
+    "lock.toggled_title": {"en": "Deploy switch", "ru": "Переключатель деплоя"},
+    "lock.toggled_desc": {
+        "en": "`{prefix}deploy` is now **{state}**.",
+        "ru": "`{prefix}deploy` теперь **{state}**.",
+    },
+    "lock.by": {"en": "Changed by", "ru": "Изменил"},
+    "lock.usage": {
+        "en": "Usage: `{prefix}deploylock on|off [minutes] [reason]`",
+        "ru": "Использование: `{prefix}deploylock on|off [минуты] [причина]`",
+    },
+    "help.deploylock": {
+        "en": "**Staff.** Close or open `{prefix}deploy` for everyone (optionally for N minutes).",
+        "ru": "**Стафф.** Закрыть или открыть `{prefix}deploy` для всех (можно на N минут).",
+    },
+    # --- servers panel (users) --------------------------------------------
+    "servers.title": {"en": "My servers", "ru": "Мои серверы"},
+    "servers.desc": {
+        "en": "You own **{count}** server(s). Pick one to open its panel.",
+        "ru": "У тебя **{count}** сервер(ов). Выбери любой, чтобы открыть панель.",
+    },
+    "servers.none_title": {"en": "No servers yet", "ru": "Серверов пока нет"},
+    "servers.none": {
+        "en": "You have no servers. Run `{prefix}deploy` — it is free for {days} days.",
+        "ru": "У тебя нет серверов. Напиши `{prefix}deploy` — бесплатно на {days} дней.",
+    },
+    "servers.field": {"en": "Your machines", "ru": "Твои машины"},
+    "servers.picker": {"en": "Select a server…", "ru": "Выбери сервер…"},
+    "servers.hint": {
+        "en": "Inside the panel: Start / Stop / Restart, web terminal and delete.",
+        "ru": "Внутри панели: Старт / Стоп / Перезапуск, веб-терминал и удаление.",
+    },
+    "servers.delete_title": {"en": "Delete this server?", "ru": "Удалить этот сервер?"},
+    "servers.delete_desc": {
+        "en": (
+            "**`{name}`** in {loc} will be destroyed with everything inside it.\n"
+            "This cannot be undone."
+        ),
+        "ru": (
+            "**`{name}`** в локации {loc} будет удалён вместе со всем содержимым.\n"
+            "Отменить это нельзя."
+        ),
+    },
+    "servers.deleted_title": {"en": "Server deleted", "ru": "Сервер удалён"},
+    "servers.deleted": {
+        "en": "**`{name}`** is gone and the slot is free again. `{prefix}deploy` to create a new one.",
+        "ru": "**`{name}`** удалён, слот освободился. `{prefix}deploy` — создать новый.",
+    },
+    "servers.delete_cancelled": {"en": "Deletion cancelled.", "ru": "Удаление отменено."},
+    "help.servers": {
+        "en": "See how many servers you have, open a panel and delete one if you want.",
+        "ru": "Посмотреть, сколько у тебя серверов, открыть панель и при желании удалить.",
+    },
+    # --- service status ----------------------------------------------------
+    "status.title": {"en": "Service status", "ru": "Статус сервисов"},
+    "status.desc": {
+        "en": "Live health of the hosting. Everything is measured right now.",
+        "ru": "Текущее состояние хостинга. Все значения измерены сейчас.",
+    },
+    "status.core": {"en": "Core services", "ru": "Основные сервисы"},
+    "status.regions": {"en": "Regions", "ru": "Локации"},
+    "status.gateway": {"en": "Discord gateway", "ru": "Шлюз Discord"},
+    "status.docker": {"en": "Virtualization", "ru": "Виртуализация"},
+    "status.deploy": {"en": "Deployments", "ru": "Создание серверов"},
+    "status.terminal": {"en": "Web terminal", "ru": "Веб-терминал"},
+    "status.guard": {"en": "Abuse guard", "ru": "Защита от абуза"},
+    "status.storage": {"en": "Data storage", "ru": "Хранилище данных"},
+    "status.ok": {"en": "Normal", "ru": "Норма"},
+    "status.load": {"en": "Under load", "ru": "Нагрузка"},
+    "status.down": {"en": "Outage", "ru": "Сбой"},
+    "status.overall_ok": {
+        "en": "All systems operational",
+        "ru": "Все системы работают",
+    },
+    "status.overall_load": {
+        "en": "Working, some services are under load",
+        "ru": "Работает, часть сервисов под нагрузкой",
+    },
+    "status.overall_down": {
+        "en": "Something is down — we are on it",
+        "ru": "Что-то не работает — уже разбираемся",
+    },
+    "status.legend": {
+        "en": "🟩 normal \u00b7 🟨 load \u00b7 🟥 outage",
+        "ru": "🟩 норма \u00b7 🟨 нагрузка \u00b7 🟥 сбой",
+    },
+    "status.updated": {"en": "Updated", "ru": "Обновлено"},
+    "status.no_image": {
+        "en": "Picture unavailable (`pip install -r requirements.txt` adds Pillow).",
+        "ru": "Картинка недоступна (`pip install -r requirements.txt` установит Pillow).",
+    },
+    "status.guard_on": {"en": "watching {count} server(s)", "ru": "следит за {count} сервером(ами)"},
+    "status.guard_off": {"en": "disabled", "ru": "отключена"},
+    "status.deploy_closed": {"en": "closed by staff", "ru": "закрыто стаффом"},
+    "status.slots_value": {"en": "{free}/{total} slots free", "ru": "{free}/{total} слотов свободно"},
+    "status.docker_down": {"en": "Docker unreachable", "ru": "Docker недоступен"},
+    "help.status": {
+        "en": "Service status as a picture: green normal, yellow load, red outage.",
+        "ru": "Статус сервисов картинкой: зелёный — норма, жёлтый — нагрузка, красный — сбой.",
+    },
+    # --- abuse guard -------------------------------------------------------
+    "guard.kind_miner": {"en": "crypto miner", "ru": "майнер"},
+    "guard.kind_attack": {"en": "attack tool", "ru": "инструмент атаки"},
+    "guard.kind_pool": {"en": "mining pool connection", "ru": "подключение к пулу"},
+    "guard.kind_cpu": {"en": "CPU pinned at 100%", "ru": "процессор загружен на 100%"},
+    "guard.warn_title": {"en": "Rule violation detected", "ru": "Нарушение правил"},
+    "guard.warn_desc": {
+        "en": (
+            "We found **{kind}** on your server **`{name}`** and stopped it.\n"
+            "Mining, stress tests and attacks are not allowed on the free tier."
+        ),
+        "ru": (
+            "На твоём сервере **`{name}`** обнаружено: **{kind}** — процессы остановлены.\n"
+            "Майнинг, стресс-тесты и атаки на бесплатном тарифе запрещены."
+        ),
+    },
+    "guard.warn_field": {"en": "What happened", "ru": "Что произошло"},
+    "guard.action_killed": {
+        "en": "The processes were killed. The server keeps running.",
+        "ru": "Процессы завершены. Сервер продолжает работать.",
+    },
+    "guard.action_stopped": {
+        "en": "Repeat violation: the server was **stopped**. Start it from `{prefix}manage`.",
+        "ru": "Повторное нарушение: сервер **остановлен**. Запустить — в `{prefix}manage`.",
+    },
+    "guard.action_warned": {
+        "en": "This is a warning — keep an eye on what runs there.",
+        "ru": "Это предупреждение — следи за тем, что там запущено.",
+    },
+    "guard.strikes": {"en": "Strikes", "ru": "Нарушений"},
+    "guard.report_title": {"en": "Abuse guard", "ru": "Защита от абуза"},
+    "guard.report_desc": {
+        "en": "**{kind}** in `{name}` (owner <@{owner}>) \u2192 {action}",
+        "ru": "**{kind}** в `{name}` (владелец <@{owner}>) \u2192 {action}",
+    },
+    "generic.build": {"en": "Build", "ru": "Сборка"},
+}
+
+for _key, _entry in _V14B_STRINGS.items():
+    STRINGS.setdefault(_key, _entry)

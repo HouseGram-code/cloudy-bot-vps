@@ -464,11 +464,19 @@ def deploy_offer_embed(
 
 
 def deploy_progress_embed(
-    stage_label: str, percent: int, log_lines: list[str], lang: str = DEFAULT_LANG
+    stage_label: str,
+    percent: int,
+    log_lines: list[str],
+    lang: str = DEFAULT_LANG,
+    location: str = "",
 ) -> discord.Embed:
+    description = f"{progress_bar(percent)}\n\n**{stage_label}**"
+    if location:
+        # Keep the chosen region visible during the whole deployment.
+        description += f"\n{EMOJI['net']} {t(lang, 'loc.chosen')}: **{location}**"
     embed = discord.Embed(
         title=f"{EMOJI['rocket']} {t(lang, 'progress.title')}",
-        description=f"{progress_bar(percent)}\n\n**{stage_label}**",
+        description=description,
         color=COLOR_WARNING,
     )
     if log_lines:
@@ -488,6 +496,11 @@ def deploy_success_embed(
         title=f"{EMOJI['check']} {t(lang, 'success.title')}",
         description=t(lang, "success.desc", prefix=P),
         color=COLOR_SUCCESS,
+    )
+    embed.add_field(
+        name=f"{EMOJI['net']} {t(lang, 'loc.chosen')}",
+        value=location_value(LOCATIONS.get(info.get("location_id")), lang),
+        inline=False,
     )
     embed.add_field(
         name=t(lang, "generic.server_id"), value=f"`{info['short_id']}`", inline=True
@@ -831,6 +844,11 @@ def manage_embed(info: dict, lang: str = DEFAULT_LANG) -> discord.Embed:
         description=description,
         color=COLOR_SUCCESS if running else COLOR_NEUTRAL,
     )
+    embed.add_field(
+        name=f"{EMOJI['net']} {t(lang, 'loc.chosen')}",
+        value=location_value(LOCATIONS.get(info.get("location_id")), lang),
+        inline=False,
+    )
 
     ram_limit = max(1, int(info.get("ram_limit_mb") or 0))
     ram_used = int(info.get("ram_used_mb") or 0) if running else 0
@@ -1128,6 +1146,16 @@ def help_embed(
     embed.add_field(name=f"`{prefix}deploy`", value=t(lang, "help.deploy"), inline=False)
     embed.add_field(name=f"`{prefix}manage`", value=t(lang, "help.manage"), inline=False)
     embed.add_field(
+        name=f"`{prefix}servers` \u2022 `{prefix}\u043c\u043e\u0438`",
+        value=t(lang, "help.servers"),
+        inline=False,
+    )
+    embed.add_field(
+        name=f"`{prefix}status` \u2022 `{prefix}\u0441\u0442\u0430\u0442\u0443\u0441`",
+        value=t(lang, "help.status"),
+        inline=False,
+    )
+    embed.add_field(
         name=f"`{prefix}specs` \u2022 `{prefix}\u0441\u043f\u0435\u043a\u0438`",
         value=t(lang, "help.specs"),
         inline=False,
@@ -1172,7 +1200,10 @@ def help_embed(
                 f"`{prefix}slots [+1|-1|set N]` • `{prefix}wipe <@user|id> [reason]`\n"
                 f"`{prefix}givevps <@user|id> [username] [RAM] [disk] [days]`\n"
                 f"\u21b3 `{prefix}givevps @user 5g 25 1` \u2014 {t(lang, 'help.givevps_hint')}\n"
-                f"`{prefix}plan [ram|disk|cpu] <N>` • `{prefix}renew <@user|id> [days]`"
+                f"`{prefix}plan [ram|disk|cpu] <N>` • `{prefix}renew <@user|id> [days]`\n"
+                f"`{prefix}deploylock on|off|status [min] [reason]` \u2014 "
+                f"{t(lang, 'help.deploylock')}\n"
+                f"`{prefix}servers all` • `{prefix}status`"
             ),
             inline=False,
         )
@@ -1467,4 +1498,422 @@ def maintenance_toggled_embed(
             value=f">>> {reason}",
             inline=False,
         )
+    return _footer(embed)
+
+
+# ---------------------------------------------------------------------------
+# 1.4 Beta (dev): regions, servers panel, service status, abuse guard
+# ---------------------------------------------------------------------------
+from config import OS_CHOICES, VPS_LIFETIME_DAYS as _TERM_DAYS  # noqa: E402
+from locations import LOCATIONS  # noqa: E402
+from locations import title as location_title  # noqa: E402
+
+
+def location_line(loc: dict, lang: str = DEFAULT_LANG) -> str:
+    """One region row: flag, name, measured ping, colored status."""
+    capacity = int(loc.get("capacity") or 0)
+    free = max(0, capacity - int(loc.get("used") or 0))
+    parts = [
+        f"{loc.get('emoji', '')} **{location_title(loc, lang)}**",
+        f"`{int(loc.get('ping') or 0)} ms`",
+        t(lang, loc.get("status_key") or "loc.status_ok"),
+    ]
+    if loc.get("available"):
+        parts.append(t(lang, "loc.free", free=free, total=capacity))
+    else:
+        parts.append(t(lang, "loc.reopen", minutes=int(loc.get("reopen_minutes") or 5)))
+    return " \u00b7 ".join(parts)
+
+
+def location_value(loc: dict, lang: str = DEFAULT_LANG) -> str:
+    """Value of the \"Location\" field on a server card."""
+    return (
+        f"{loc.get('emoji', '')} **{location_title(loc, lang)}** \u00b7 `{loc.get('code', '-')}`\n"
+        + t(lang, "loc.ping_value", ping=int(loc.get("ping") or 0))
+    )
+
+
+def location_of(record: dict, lang: str = DEFAULT_LANG) -> dict:
+    """Live region data for one VPS record / info dict."""
+    return LOCATIONS.get((record or {}).get("location_id"))
+
+
+def os_line(choice: dict, lang: str = DEFAULT_LANG) -> str:
+    mark = EMOJI["check"] if choice.get("available") else EMOJI["clock"]
+    tail = (
+        t(lang, "os.recommended")
+        if choice.get("available") and choice.get("recommended")
+        else ("" if choice.get("available") else t(lang, "os.soon"))
+    )
+    line = f"{mark} **{choice.get('label', '-')}** \u00b7 `{choice.get('codename', '')}`"
+    return f"{line} \u00b7 {tail}" if tail else line
+
+
+def deploy_location_embed(
+    user: discord.abc.User,
+    lang: str = DEFAULT_LANG,
+    locations: list | None = None,
+    stats: dict | None = None,
+) -> discord.Embed:
+    """Step 1 of `!deploy`: the region picker with live ping."""
+    items = list(locations or LOCATIONS.all())
+    open_count = sum(1 for item in items if item.get("available"))
+    embed = discord.Embed(
+        title=f"{EMOJI['net']} {t(lang, 'loc.title')}",
+        description=t(
+            lang,
+            "loc.desc",
+            user=user.mention,
+            count=len(items),
+            open=open_count,
+        ),
+        color=COLOR_PRIMARY,
+    )
+    embed.set_author(name=t(lang, "wizard.step", step=1, total=3))
+    embed.add_field(
+        name=f"{EMOJI['cloud']} {t(lang, 'loc.field')}",
+        value="\n".join(location_line(item, lang) for item in items),
+        inline=False,
+    )
+    embed.add_field(
+        name=f"{EMOJI['spark']} {t(lang, 'loc.legend_field')}",
+        value=t(lang, "loc.legend"),
+        inline=False,
+    )
+    if not open_count:
+        embed.add_field(
+            name=f"{EMOJI['clock']} {t(lang, 'loc.status_down')}",
+            value=t(lang, "loc.all_closed"),
+            inline=False,
+        )
+    if stats:
+        embed.add_field(
+            name=f"{EMOJI['gear']} {t(lang, 'admin.capacity')}",
+            value=capacity_line(stats, lang),
+            inline=False,
+        )
+    return _footer(embed)
+
+
+def deploy_os_embed(
+    loc: dict, lang: str = DEFAULT_LANG, choices: list | None = None
+) -> discord.Embed:
+    """Step 2 of `!deploy`: pick the Ubuntu release."""
+    items = list(choices or OS_CHOICES)
+    embed = discord.Embed(
+        title=f"{EMOJI['os']} {t(lang, 'os.title')}",
+        description=t(lang, "os.desc", loc=location_title(loc, lang)),
+        color=COLOR_PRIMARY,
+    )
+    embed.set_author(name=t(lang, "wizard.step", step=2, total=3))
+    embed.add_field(
+        name=f"{EMOJI['net']} {t(lang, 'loc.chosen')}",
+        value=location_value(loc, lang),
+        inline=False,
+    )
+    embed.add_field(
+        name=f"{EMOJI['disk']} {t(lang, 'os.field')}",
+        value="\n".join(os_line(item, lang) for item in items),
+        inline=False,
+    )
+    return _footer(embed)
+
+
+def deploy_confirm_embed(
+    loc: dict,
+    choice: dict,
+    lang: str = DEFAULT_LANG,
+    stats: dict | None = None,
+) -> discord.Embed:
+    """Step 3 of `!deploy`: what exactly will be created."""
+    plan = PLAN_STORE.plan()
+    embed = discord.Embed(
+        title=f"{EMOJI['rocket']} {t(lang, 'confirm.title')}",
+        description=t(
+            lang,
+            "confirm.desc",
+            os=choice.get("label", "-"),
+            loc=location_title(loc, lang),
+            ping=int(loc.get("ping") or 0),
+            days=int(VPS_LIFETIME_DAYS),
+        ),
+        color=COLOR_SUCCESS,
+    )
+    embed.set_author(name=t(lang, "wizard.step", step=3, total=3))
+    embed.add_field(
+        name=f"{EMOJI['net']} {t(lang, 'loc.chosen')}",
+        value=location_value(loc, lang),
+        inline=True,
+    )
+    embed.add_field(
+        name=f"{EMOJI['os']} {t(lang, 'os.chosen')}",
+        value=f"**{choice.get('label', '-')}**\n`{choice.get('codename', '')}`",
+        inline=True,
+    )
+    embed.add_field(
+        name=f"{EMOJI['spark']} {t(lang, 'deploy.plan')}",
+        value=(
+            f"{EMOJI['ram']} **{plan['ram_mb']} MB** \u00b7 "
+            f"{EMOJI['cpu']} **{plan['cpu_cores']:g} vCPU** \u00b7 "
+            f"{EMOJI['disk']} **{plan['disk_gb']} GB**"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name=f"{EMOJI['clock']} {t(lang, 'term.field')}",
+        value=term_line(lang),
+        inline=False,
+    )
+    if stats:
+        embed.add_field(
+            name=f"{EMOJI['gear']} {t(lang, 'admin.capacity')}",
+            value=capacity_line(stats, lang),
+            inline=False,
+        )
+    return _footer(embed)
+
+
+def deploy_closed_embed(state: dict, lang: str = DEFAULT_LANG) -> discord.Embed:
+    """Shown to users while staff keeps `!deploy` closed."""
+    embed = discord.Embed(
+        title=f"{EMOJI['lock']} {t(lang, 'lock.closed_title')}",
+        description=t(lang, "lock.closed_desc", prefix=P),
+        color=COLOR_WARNING,
+    )
+    embed.add_field(
+        name=f"{EMOJI['scroll']} {t(lang, 'lock.reason')}",
+        value=(state.get("reason") or "").strip() or t(lang, "lock.no_reason"),
+        inline=False,
+    )
+    minutes = int(state.get("minutes_left") or 0)
+    embed.add_field(
+        name=f"{EMOJI['clock']} {t(lang, 'lock.until')}",
+        value=(
+            t(lang, "lock.until_value", minutes=minutes)
+            if minutes
+            else t(lang, "lock.manual")
+        ),
+        inline=False,
+    )
+    return _footer(embed)
+
+
+def deploy_lock_embed(state: dict, lang: str = DEFAULT_LANG) -> discord.Embed:
+    """Staff confirmation card for `!deploylock`."""
+    closed = bool(state.get("closed"))
+    embed = discord.Embed(
+        title=f"{EMOJI['lock'] if closed else EMOJI['check']} {t(lang, 'lock.toggled_title')}",
+        description=t(
+            lang,
+            "lock.toggled_desc",
+            prefix=P,
+            state=t(lang, "lock.state_closed" if closed else "lock.state_open"),
+        ),
+        color=COLOR_WARNING if closed else COLOR_SUCCESS,
+    )
+    if closed:
+        embed.add_field(
+            name=f"{EMOJI['scroll']} {t(lang, 'lock.reason')}",
+            value=(state.get("reason") or "").strip() or t(lang, "lock.no_reason"),
+            inline=True,
+        )
+        minutes = int(state.get("minutes_left") or 0)
+        embed.add_field(
+            name=f"{EMOJI['clock']} {t(lang, 'lock.until')}",
+            value=(
+                t(lang, "lock.until_value", minutes=minutes)
+                if minutes
+                else t(lang, "lock.manual")
+            ),
+            inline=True,
+        )
+    if state.get("by_name"):
+        embed.add_field(
+            name=f"{EMOJI['user']} {t(lang, 'lock.by')}",
+            value=f"`{state['by_name']}`",
+            inline=False,
+        )
+    return _footer(embed)
+
+
+def servers_list_embed(
+    user: discord.abc.User,
+    records: list,
+    lang: str = DEFAULT_LANG,
+    stats: dict | None = None,
+) -> discord.Embed:
+    """`!servers`: how many machines the user owns."""
+    items = list(records or [])
+    if not items:
+        embed = discord.Embed(
+            title=f"{EMOJI['cloud']} {t(lang, 'servers.none_title')}",
+            description=t(lang, "servers.none", prefix=P, days=int(VPS_LIFETIME_DAYS)),
+            color=COLOR_NEUTRAL,
+        )
+        return _footer(embed)
+
+    embed = discord.Embed(
+        title=f"{EMOJI['cloud']} {t(lang, 'servers.title')}",
+        description=t(lang, "servers.desc", count=len(items)),
+        color=COLOR_PRIMARY,
+    )
+    lines = []
+    for index, record in enumerate(items[:25], start=1):
+        loc = location_of(record, lang)
+        lines.append(
+            f"`{index}.` **`{record.get('name', '-')}`**\n"
+            f"\u21b3 {loc.get('emoji', '')} {location_title(loc, lang)} \u00b7 "
+            f"{int(record.get('ram_mb') or 0)} MB \u00b7 {int(record.get('disk_gb') or 0)} GB \u00b7 "
+            f"<t:{int(record.get('created_ts') or 0)}:R>"
+        )
+    embed.add_field(
+        name=f"{EMOJI['gear']} {t(lang, 'servers.field')}",
+        value="\n".join(lines),
+        inline=False,
+    )
+    embed.add_field(
+        name=f"{EMOJI['spark']} {t(lang, 'servers.hint')}",
+        value=f"`{P}manage` \u00b7 `{P}sshx` \u00b7 `{P}specs`",
+        inline=False,
+    )
+    if stats:
+        embed.add_field(
+            name=f"{EMOJI['cloud']} {t(lang, 'admin.capacity')}",
+            value=capacity_line(stats, lang),
+            inline=False,
+        )
+    return _footer(embed)
+
+
+def server_delete_confirm_embed(info: dict, lang: str = DEFAULT_LANG) -> discord.Embed:
+    loc = location_of(info, lang)
+    embed = discord.Embed(
+        title=f"{EMOJI['cross']} {t(lang, 'servers.delete_title')}",
+        description=t(
+            lang,
+            "servers.delete_desc",
+            name=info.get("name", "-"),
+            loc=location_title(loc, lang),
+        ),
+        color=COLOR_ERROR,
+    )
+    return _footer(embed)
+
+
+def server_deleted_embed(name: str, lang: str = DEFAULT_LANG) -> discord.Embed:
+    embed = discord.Embed(
+        title=f"{EMOJI['check']} {t(lang, 'servers.deleted_title')}",
+        description=t(lang, "servers.deleted", name=name, prefix=P),
+        color=COLOR_SUCCESS,
+    )
+    return _footer(embed)
+
+
+def status_embed(
+    rows: list,
+    overall: str = "ok",
+    lang: str = DEFAULT_LANG,
+    has_image: bool = True,
+) -> discord.Embed:
+    """`!status`: the text half of the service-status answer."""
+    colors = {"ok": COLOR_SUCCESS, "load": COLOR_WARNING, "down": COLOR_ERROR}
+    emojis = {"ok": EMOJI["online"], "load": EMOJI["pending"], "down": EMOJI["offline"]}
+    embed = discord.Embed(
+        title=f"{emojis.get(overall, EMOJI['online'])} {t(lang, 'status.title')}",
+        description=(
+            f"**{t(lang, 'status.overall_' + overall)}**\n"
+            + t(lang, "status.desc")
+        ),
+        color=colors.get(overall, COLOR_SUCCESS),
+    )
+
+    section = ""
+    lines: list[str] = []
+    for row in rows or []:
+        if row.get("section"):
+            if lines:
+                embed.add_field(name=section, value="\n".join(lines), inline=False)
+                lines = []
+            section = f"{EMOJI['gear']} {row['section']}"
+            continue
+        badge = {"ok": "\U0001F7E9", "load": "\U0001F7E8", "down": "\U0001F7E5"}.get(
+            row.get("status", "ok"), "\U0001F7E9"
+        )
+        detail = row.get("detail")
+        lines.append(
+            f"{badge} **{row.get('label', '-')}** \u00b7 {row.get('text', '')}"
+            + (f" \u00b7 `{detail}`" if detail else "")
+        )
+    if lines:
+        embed.add_field(name=section or t(lang, "status.core"), value="\n".join(lines), inline=False)
+
+    embed.add_field(
+        name=f"{EMOJI['spark']} {t(lang, 'loc.legend_field')}",
+        value=t(lang, "status.legend"),
+        inline=False,
+    )
+    if not has_image:
+        embed.add_field(
+            name=f"{EMOJI['cross']} {t(lang, 'status.no_image')}",
+            value=f"`pip install -r requirements.txt`",
+            inline=False,
+        )
+    return _footer(embed)
+
+
+def guard_warning_embed(incident: dict, lang: str = DEFAULT_LANG) -> discord.Embed:
+    """DM sent to the owner when the abuse guard fires."""
+    kind = t(lang, "guard.kind_" + str(incident.get("kind") or "miner"))
+    embed = discord.Embed(
+        title=f"{EMOJI['shield']} {t(lang, 'guard.warn_title')}",
+        description=t(
+            lang,
+            "guard.warn_desc",
+            kind=kind,
+            name=incident.get("container", "-"),
+        ),
+        color=COLOR_ERROR,
+    )
+    action = str(incident.get("action") or "killed")
+    embed.add_field(
+        name=f"{EMOJI['hammer']} {t(lang, 'guard.warn_field')}",
+        value=t(lang, "guard.action_" + (action if action in ("killed", "stopped", "warned") else "killed"), prefix=P),
+        inline=False,
+    )
+    details = []
+    if incident.get("processes"):
+        details.append("`" + "`, `".join(str(p) for p in incident["processes"][:5]) + "`")
+    if incident.get("pool_ports"):
+        details.append("TCP `" + "`, `".join(str(p) for p in incident["pool_ports"]) + "`")
+    if incident.get("cpu_percent"):
+        details.append(f"CPU `{incident['cpu_percent']}%`")
+    if details:
+        embed.add_field(
+            name=f"{EMOJI['gear']} {t(lang, 'generic.status')}",
+            value=" \u00b7 ".join(details),
+            inline=False,
+        )
+    embed.add_field(
+        name=f"{EMOJI['scroll']} {t(lang, 'guard.strikes')}",
+        value=f"**{int(incident.get('strikes') or 1)}** \u00b7 `{P}rules`",
+        inline=False,
+    )
+    return _footer(embed)
+
+
+def guard_report_embed(incident: dict, lang: str = DEFAULT_LANG) -> discord.Embed:
+    """Short staff-facing line about one incident."""
+    kind = t(lang, "guard.kind_" + str(incident.get("kind") or "miner"))
+    embed = discord.Embed(
+        title=f"{EMOJI['shield']} {t(lang, 'guard.report_title')}",
+        description=t(
+            lang,
+            "guard.report_desc",
+            kind=kind,
+            name=incident.get("container", "-"),
+            owner=int(incident.get("owner_id") or 0),
+            action=str(incident.get("action") or "-"),
+        ),
+        color=COLOR_WARNING,
+    )
     return _footer(embed)

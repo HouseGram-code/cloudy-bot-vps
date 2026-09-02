@@ -1,4 +1,4 @@
-# Cloudy VPS Bot v1.3 Beta
+# Cloudy VPS Bot v1.4 Beta (dev)
 FROM python:3.12-slim
 
 # DATA_DIR is where every JSON store lives (state, wallet, bans, languages...).
@@ -10,7 +10,7 @@ ENV PYTHONUNBUFFERED=1 \
     DATA_DIR=/app/data
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl \
+        ca-certificates curl fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
 # Docker CLI (handy for debugging inside the bot container)

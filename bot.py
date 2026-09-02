@@ -1,12 +1,16 @@
 """Cloudy VPS Bot - free VPS hosting from Discord.
 
-Version 1.3 Beta (bilingual RU / EN, 30-day free VPS, browser terminal access)
+Version 1.4 Beta (dev): five regions with live ping, Ubuntu picker, personal
+server panels, service status card, a deploy switch for staff and the
+anti-abuse guard.
 """
 
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
+import os
 import re
 import time
 
@@ -14,25 +18,34 @@ import discord
 from discord.ext import commands, tasks
 
 import embeds
+import statuscard
 from config import (
     ANIM_DELAY,
+    BOT_BUILD,
     BOT_NAME,
     BOT_VERSION,
+    COLOR_ERROR,
     COLOR_PRIMARY,
+    COLOR_SUCCESS,
     COLOR_WARNING,
     COMMAND_PREFIX,
     DISCORD_TOKEN,
     EMOJI,
     LEAVES_ENABLED,
     OWNER_IDS,
+    STATUS_IMAGE,
     VPS_EXPIRY_ACTION,
     VPS_EXPIRY_WARN_DAYS,
     VPS_LIFETIME_DAYS,
     is_owner,
 )
+from deploy_lock import DEPLOY_LOCK
+from guard import GUARD
 from i18n import LANGUAGES, LangStore, lang_label, normalize
 from i18n import rules as rules_for
 from i18n import t
+from locations import LOCATIONS, tcp_ping, usage_from_records
+from locations import plain_title as location_plain
 from maintenance import MAINTENANCE
 from moderation import BanStore, ModerationError
 from plan_store import PLAN_STORE
@@ -43,6 +56,7 @@ from views import (
     LanguageView,
     ManageView,
     ProfileView,
+    ServersView,
     deliver_sshx,
 )
 from vps_manager import VPSError, VPSManager
@@ -98,6 +112,9 @@ MAINTENANCE_ALLOWED = {
     "slots",
     "plan",
     "wipe",
+    "status",
+    "servers",
+    "deploylock",
 }
 
 
@@ -113,8 +130,29 @@ async def on_ready() -> None:
             log.info("Docker backend ready, VPS image available")
         except Exception as exc:
             log.error("Docker backend unavailable: %s", exc)
+    # 1.4 Beta: adopt every guest that already runs on the host, so the
+    # servers stay exactly where they were after an update or a rebuild.
+    if manager is not None:
+        try:
+            report = await manager.sync_state()
+            log.info(
+                "servers restored: %s total (adopted %s, dropped %s, repaired %s)",
+                report.get("total"),
+                report.get("adopted"),
+                report.get("dropped"),
+                report.get("repaired"),
+            )
+        except Exception as exc:  # pragma: no cover
+            log.warning("state sync failed: %s", exc)
+        GUARD.attach(manager)
     if not presence_loop.is_running():
         presence_loop.start()
+    if not locations_loop.is_running():
+        locations_loop.start()
+    if GUARD.enabled and not guard_loop.is_running():
+        guard_loop.change_interval(seconds=max(30, int(GUARD.interval)))
+        guard_loop.start()
+        log.info("abuse guard on: scanning every %ss", GUARD.interval)
     # Leaves do not limit anything any more, so the billing loop only runs
     # when the old economy is explicitly turned back on (LEAVES_ENABLED=1).
     if WALLET.limits_active():
@@ -445,8 +483,15 @@ async def _before_expiry_loop() -> None:
 @bot.command(name="deploy")
 @commands.cooldown(1, 15, commands.BucketType.user)
 async def deploy(ctx: commands.Context) -> None:
-    """Show the free plan specs and deploy a VPS."""
+    """Region picker, Ubuntu picker and the live deployment."""
     lang = lang_of(ctx.author)
+    # Staff can close !deploy for everyone with !deploylock.
+    if DEPLOY_LOCK.closed and not is_owner(ctx.author.id):
+        await ctx.reply(
+            embed=embeds.deploy_closed_embed(DEPLOY_LOCK.state(), lang),
+            mention_author=False,
+        )
+        return
     try:
         mgr = _require_manager()
         if await mgr.has_vps(ctx.author.id):
@@ -484,9 +529,15 @@ async def deploy(ctx: commands.Context) -> None:
         return
 
     stats = await _stats()
-    view = DeployView(mgr, ctx.author.id, bans, lang=lang)
+    # Refresh the region board (ping, load, auto-close / auto-reopen) right
+    # before the picker is shown.
+    try:
+        await LOCATIONS.refresh(usage_from_records(mgr.all_records()))
+    except Exception as exc:  # pragma: no cover
+        log.warning("region refresh failed: %s", exc)
+    view = DeployView(mgr, ctx.author.id, bans, lang=lang, stats=stats or None)
     msg = await ctx.reply(
-        embed=embeds.deploy_offer_embed(ctx.author, lang, stats=stats or None),
+        embed=view.render(ctx.author),
         view=view,
         mention_author=False,
     )
@@ -825,9 +876,12 @@ async def bans_cmd(ctx: commands.Context) -> None:
     )
 
 
-@bot.command(name="servers")
-@owner_only()
-async def servers_cmd(ctx: commands.Context) -> None:
+@bot.command(name="servers", aliases=["myvps", "\u043c\u043e\u0438", "\u0441\u0435\u0440\u0432\u0435\u0440\u0430"])
+async def servers_cmd(ctx: commands.Context, *, args: str = "") -> None:
+    """Your machines: pick one in the menu to open its panel.
+
+    Staff can still see the global list with `!servers all`.
+    """
     lang = lang_of(ctx.author)
     try:
         mgr = _require_manager()
@@ -835,6 +889,26 @@ async def servers_cmd(ctx: commands.Context) -> None:
         await ctx.reply(
             embed=embeds.error_embed(str(exc), lang=lang), mention_author=False
         )
+        return
+
+    wants_all = (args or "").strip().lower() in ("all", "\u0432\u0441\u0435", "*")
+    if not (wants_all and is_owner(ctx.author.id)):
+        stats = await _stats()
+        records = mgr.records_of(ctx.author.id)
+        view = ServersView(
+            mgr,
+            ctx.author.id,
+            bans,
+            lang=lang,
+            records=records,
+            stats=stats or None,
+        )
+        msg = await ctx.reply(
+            embed=view.render(ctx.author),
+            view=view if records else None,
+            mention_author=False,
+        )
+        view.message = msg
         return
 
     stats = await _stats()
@@ -1667,6 +1741,335 @@ async def on_command_error(ctx: commands.Context, error: Exception) -> None:
 
     log.exception("command error", exc_info=error)
     await ctx.reply(embed=embeds.error_embed(f"`{error}`", lang=lang), mention_author=False)
+
+
+# ---------------------------------------------------------------------------
+# 1.4 Beta (dev): deploy switch, service status card, background loops
+# ---------------------------------------------------------------------------
+@bot.command(
+    name="deploylock",
+    aliases=["deploytoggle", "\u0437\u0430\u043c\u043e\u043a"],
+)
+@owner_only()
+async def deploylock_cmd(ctx: commands.Context, *, args: str = "") -> None:
+    """`!deploylock on|off|status [minutes] [reason]` - close or open !deploy."""
+    lang = lang_of(ctx.author)
+    parts = (args or "").split()
+    action = parts[0].lower() if parts else "toggle"
+    rest = parts[1:]
+    minutes = 0
+    if rest and rest[0].isdigit():
+        minutes = max(0, min(int(rest[0]), 7 * 24 * 60))
+        rest = rest[1:]
+    reason = " ".join(rest).strip()
+
+    if action in ("status", "state", "\u0441\u0442\u0430\u0442\u0443\u0441"):
+        await ctx.reply(
+            embed=embeds.deploy_lock_embed(DEPLOY_LOCK.state(), lang),
+            mention_author=False,
+        )
+        return
+
+    if action in (
+        "off",
+        "open",
+        "\u043e\u0442\u043a\u0440\u044b\u0442\u044c",
+        "\u043e\u0442\u043a\u0440\u043e\u0439",
+    ):
+        state = await DEPLOY_LOCK.reopen(ctx.author.id, str(ctx.author))
+    elif action in (
+        "on",
+        "close",
+        "\u0437\u0430\u043a\u0440\u044b\u0442\u044c",
+        "\u0437\u0430\u043a\u0440\u043e\u0439",
+    ):
+        state = await DEPLOY_LOCK.close(
+            ctx.author.id, str(ctx.author), reason, minutes
+        )
+    else:
+        state = await DEPLOY_LOCK.toggle(
+            ctx.author.id, str(ctx.author), reason, minutes
+        )
+
+    log.info(
+        "deploy is now %s (by %s)",
+        "closed" if state.get("closed") else "open",
+        ctx.author,
+    )
+    await ctx.reply(embed=embeds.deploy_lock_embed(state, lang), mention_author=False)
+
+
+def _health(status: str, label: str, lang: str, detail: str = "") -> dict:
+    """One row of the status card: green = ok, yellow = load, red = outage."""
+    return {
+        "label": label,
+        "status": status,
+        "text": t(lang, "status." + status),
+        "detail": detail,
+    }
+
+
+async def _status_rows(lang: str) -> list[dict]:
+    """Real checks: gateway, Docker, deploy, terminal, guard, storage, regions."""
+    rows: list[dict] = [{"section": t(lang, "status.core")}]
+
+    # 1. Discord gateway - our own websocket latency (NaN before the first
+    #    heartbeat, so compare the value with itself).
+    raw = bot.latency
+    latency = raw * 1000.0 if raw == raw else 0.0
+    if latency <= 0:
+        rows.append(_health("load", t(lang, "status.gateway"), lang, "-"))
+    else:
+        level = "ok" if latency < 250 else "load" if latency < 600 else "down"
+        rows.append(
+            _health(level, t(lang, "status.gateway"), lang, f"{latency:.0f} ms")
+        )
+
+    # 2. Virtualization - is the Docker daemon answering?
+    stats = await _stats()
+    docker_ok = False
+    if manager is not None:
+        try:
+            docker_ok = bool(await asyncio.to_thread(manager.client.ping))
+        except Exception:
+            docker_ok = False
+    rows.append(
+        _health(
+            "ok" if docker_ok else "down",
+            t(lang, "status.docker"),
+            lang,
+            (
+                f"{int(stats.get('running', 0))}/{int(stats.get('used', 0))}"
+                if docker_ok
+                else t(lang, "status.docker_down")
+            ),
+        )
+    )
+
+    # 3. Deployments - staff lock first, then free slots.
+    free = int(stats.get("free", 0)) if stats else 0
+    total = int(stats.get("slots", SLOTS.total)) if stats else SLOTS.total
+    slot_detail = t(lang, "status.slots_value", free=free, total=total)
+    if DEPLOY_LOCK.closed:
+        rows.append(
+            _health(
+                "down",
+                t(lang, "status.deploy"),
+                lang,
+                t(lang, "status.deploy_closed"),
+            )
+        )
+    elif not docker_ok:
+        rows.append(
+            _health(
+                "down", t(lang, "status.deploy"), lang, t(lang, "status.docker_down")
+            )
+        )
+    else:
+        rows.append(
+            _health(
+                "ok" if free > 0 else "load",
+                t(lang, "status.deploy"),
+                lang,
+                slot_detail,
+            )
+        )
+
+    # 4. Web terminal - real TCP handshake with sshx.io.
+    try:
+        rtt = await asyncio.to_thread(tcp_ping, "sshx.io", 443, 1.5)
+    except Exception:  # pragma: no cover
+        rtt = None
+    if rtt is None:
+        rows.append(_health("down", t(lang, "status.terminal"), lang, "sshx.io:443"))
+    else:
+        rows.append(
+            _health(
+                "ok" if rtt < 400 else "load",
+                t(lang, "status.terminal"),
+                lang,
+                f"{rtt:.0f} ms",
+            )
+        )
+
+    # 5. Abuse guard.
+    if GUARD.enabled:
+        rows.append(
+            _health(
+                "ok",
+                t(lang, "status.guard"),
+                lang,
+                t(lang, "status.guard_on", count=int(stats.get("used", 0))),
+            )
+        )
+    else:
+        rows.append(
+            _health(
+                "load", t(lang, "status.guard"), lang, t(lang, "status.guard_off")
+            )
+        )
+
+    # 6. Storage - can we still write the state files?
+    folder = os.path.dirname(os.path.abspath(DEPLOY_LOCK.path)) or "."
+    rows.append(
+        _health(
+            "ok" if os.access(folder, os.W_OK) else "down",
+            t(lang, "status.storage"),
+            lang,
+            "data/",
+        )
+    )
+
+    # 7. The five regions (ping, load, and the 5-15 minute auto-close).
+    rows.append({"section": t(lang, "status.regions")})
+    try:
+        await LOCATIONS.refresh(
+            usage_from_records(manager.all_records() if manager is not None else [])
+        )
+    except Exception as exc:  # pragma: no cover
+        log.warning("region refresh failed: %s", exc)
+    for item in LOCATIONS.all():
+        detail = (
+            f"{item['ping']} ms"
+            if item["available"]
+            else f"{item['reopen_minutes']} min"
+        )
+        rows.append(
+            _health(item["status"], location_plain(item, lang), lang, detail)
+        )
+    return rows
+
+
+@bot.command(
+    name="status",
+    aliases=[
+        "\u0441\u0442\u0430\u0442\u0443\u0441",
+        "health",
+        "\u0441\u0435\u0440\u0432\u0438\u0441",
+    ],
+)
+@commands.cooldown(1, 10, commands.BucketType.user)
+async def status_cmd(ctx: commands.Context) -> None:
+    """Service status card: green = normal, yellow = load, red = outage."""
+    lang = lang_of(ctx.author)
+    async with ctx.typing():
+        rows = await _status_rows(lang)
+        overall = statuscard.overall_status(rows)
+
+        png: bytes | None = None
+        if STATUS_IMAGE and statuscard.HAS_PILLOW and statuscard.has_unicode_font():
+            legend = [
+                ("ok", t(lang, "status.ok")),
+                ("load", t(lang, "status.load")),
+                ("down", t(lang, "status.down")),
+            ]
+            footer = (
+                f"{t(lang, 'status.updated')}: "
+                f"{time.strftime('%H:%M UTC', time.gmtime())}"
+            )
+            try:
+                png = await asyncio.to_thread(
+                    statuscard.render_status_card,
+                    t(lang, "status.title"),
+                    f"{BOT_NAME} \u2022 v{BOT_VERSION} \u2022 {BOT_BUILD}",
+                    rows,
+                    legend,
+                    footer,
+                    overall,
+                )
+            except Exception as exc:
+                log.warning("status card failed: %s", exc)
+                png = None
+
+    if png:
+        embed = embeds.status_embed(rows, overall, lang, True)
+        embed.set_image(url="attachment://cloudy-status.png")
+        await ctx.reply(
+            embed=embed,
+            file=discord.File(io.BytesIO(png), filename="cloudy-status.png"),
+            mention_author=False,
+        )
+        return
+
+    await ctx.reply(
+        embed=embeds.status_embed(rows, overall, lang, False), mention_author=False
+    )
+
+
+@tasks.loop(seconds=60)
+async def locations_loop() -> None:
+    """Keep the region board live: ping, load, auto-close and auto-reopen."""
+    if manager is None:
+        return
+    try:
+        await LOCATIONS.refresh(usage_from_records(manager.all_records()))
+    except Exception as exc:  # pragma: no cover
+        log.warning("region loop failed: %s", exc)
+
+
+@locations_loop.before_loop
+async def _before_locations_loop() -> None:
+    await bot.wait_until_ready()
+
+
+@tasks.loop(seconds=120)
+async def guard_loop() -> None:
+    """Anti-abuse sweep: miners, attack tools, pool sockets, pinned CPU."""
+    incidents = await GUARD.scan()
+    for incident in incidents:
+        owner_id = int(incident.get("owner_id") or 0)
+        log.warning(
+            "abuse guard: %s in %s (owner %s, action %s, strikes %s)",
+            incident.get("kind"),
+            incident.get("container"),
+            owner_id,
+            incident.get("action"),
+            incident.get("strikes"),
+        )
+
+        if owner_id:
+            user = bot.get_user(owner_id)
+            if user is None:
+                try:
+                    user = await bot.fetch_user(owner_id)
+                except discord.HTTPException:
+                    user = None
+            if user is not None:
+                try:
+                    await user.send(
+                        embed=embeds.guard_warning_embed(incident, lang_of(owner_id))
+                    )
+                except discord.HTTPException:
+                    pass
+
+        # Repeat offenders can be banned automatically (GUARD_BAN_ON_STRIKE=1).
+        if incident.get("ban") and owner_id:
+            try:
+                await bans.ban(
+                    owner_id,
+                    f"abuse guard: {incident.get('kind') or 'miner'}",
+                    0,
+                    "Abuse guard",
+                    str(incident.get("owner_name") or ""),
+                )
+            except Exception as exc:  # pragma: no cover
+                log.info("guard ban skipped: %s", exc)
+
+        for staff_id in OWNER_IDS:
+            staff = bot.get_user(int(staff_id))
+            if staff is None:
+                continue
+            try:
+                await staff.send(
+                    embed=embeds.guard_report_embed(incident, lang_of(int(staff_id)))
+                )
+            except discord.HTTPException:
+                pass
+
+
+@guard_loop.before_loop
+async def _before_guard_loop() -> None:
+    await bot.wait_until_ready()
 
 
 def main() -> None:

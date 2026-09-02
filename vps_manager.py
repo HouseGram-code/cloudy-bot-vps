@@ -21,12 +21,18 @@ import docker
 from docker.errors import APIError, ImageNotFound, NotFound
 
 from i18n import t
+from locations import LOCATIONS
 from plan_store import PLAN_STORE
 from slots import SLOTS
 from config import (
     COMMAND_PREFIX,
     CONTAINER_PREFIX,
+    DEFAULT_OS_ID,
+    GUEST_CAP_DROP,
+    GUEST_MAX_FILES,
+    GUEST_MAX_PROCS,
     MAX_VPS_PER_USER,
+    OS_BY_ID,
     PLAN,
     SSHX_BINARY_BASE,
     SSHX_ENABLED,
@@ -186,6 +192,199 @@ class VPSManager:
         except APIError as exc:  # pragma: no cover
             log.warning("could not list VPS containers: %s", exc)
             return []
+
+    def guest_containers(self) -> list:
+        """Public alias of the guest list (used by the abuse guard)."""
+        return self._all_vps_containers()
+
+    def records_of(self, user_id: int) -> list[tuple[str, dict]]:
+        """(state key, record) pairs of one user - primary server first."""
+        records = list(self._records_for(user_id))
+        records.sort(
+            key=lambda item: (
+                item[0] != str(user_id),
+                -float(item[1].get("created_ts") or 0),
+            )
+        )
+        return records
+
+    def _container_for_key(self, user_id: int, key: str | None = None):
+        """Container + record for one specific server of this user.
+
+        `key` is the state key: the plain user id for the primary server, or
+        `<user_id>:<short_id>` for the extra ones.
+        """
+        state_key = str(key or user_id)
+        record = self._state["servers"].get(state_key)
+        if record is None:
+            return None, None
+        # Ownership check - a panel key from another user is refused.
+        if state_key.split(":")[0] != str(user_id) and str(
+            record.get("owner_id")
+        ) != str(user_id):
+            return None, None
+        try:
+            container = self.client.containers.get(record["container_id"])
+        except NotFound:
+            self._state["servers"].pop(state_key, None)
+            self._save_state()
+            return None, None
+        return container, record
+
+    # ------------------------------------------------------------------
+    # 1.4 Beta: hardening + state reconciliation (servers survive updates)
+    # ------------------------------------------------------------------
+    def _harden_guest(self, container) -> None:
+        """Blackhole the well-known mining pools inside the guest."""
+        try:
+            from guard import hosts_blackhole_script
+        except Exception:  # pragma: no cover
+            return
+        self._exec(container, hosts_blackhole_script())
+
+    def _ensure_location(self, record: dict) -> bool:
+        """Give pre-1.4 servers a region. True when the record changed."""
+        if record.get("location_id"):
+            return False
+        record.update(LOCATIONS.record_fields(LOCATIONS.get(None)))
+        if not record.get("os_id"):
+            record["os_id"] = DEFAULT_OS_ID
+        return True
+
+    def _record_from_container(self, container, owner_id: int, labels: dict) -> dict:
+        """Rebuild a state record from a live container and its labels."""
+        host = container.attrs.get("HostConfig") or {}
+        config = container.attrs.get("Config") or {}
+        mem = int(host.get("Memory") or 0)
+        nano = int(host.get("NanoCpus") or 0)
+        created_ts = time.time()
+        match = re.match(
+            r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,6}))?",
+            str(container.attrs.get("Created") or ""),
+        )
+        if match:
+            stamp = match.group(1) + (f".{match.group(2)}" if match.group(2) else "")
+            try:
+                created_ts = (
+                    dt.datetime.fromisoformat(stamp)
+                    .replace(tzinfo=dt.timezone.utc)
+                    .timestamp()
+                )
+            except ValueError:  # pragma: no cover
+                pass
+        plan = dict(PLAN_STORE.plan())
+        choice = (
+            OS_BY_ID.get(str(labels.get("cloudy.os_id") or ""))
+            or OS_BY_ID.get(str(labels.get("cloudy.os") or ""))
+            or OS_BY_ID.get(DEFAULT_OS_ID)
+            or {}
+        )
+        record = {
+            "container_id": container.id,
+            "name": container.name,
+            "hostname": config.get("Hostname") or container.name,
+            "owner_id": owner_id,
+            "owner_name": labels.get("cloudy.owner_name") or str(owner_id),
+            "ssh_user": "root",
+            "login": "root",
+            "os": choice.get("full") or plan["os"],
+            "ram_mb": int(mem / (1024 * 1024)) if mem else int(plan["ram_mb"]),
+            "swap_mb": int(plan.get("swap_mb") or 0),
+            "cpu_cores": (nano / 1_000_000_000) if nano else plan["cpu_cores"],
+            "disk_gb": int(plan["disk_gb"]),
+            "bandwidth": plan["bandwidth"],
+            "created_ts": created_ts,
+            "term_days": int(VPS_LIFETIME_DAYS),
+            "expires_ts": (
+                created_ts + VPS_LIFETIME_SECONDS if VPS_LIFETIME_SECONDS > 0 else 0.0
+            ),
+            "warned_days": [],
+            "os_id": str(choice.get("id") or DEFAULT_OS_ID),
+        }
+        record.update(
+            LOCATIONS.record_fields(LOCATIONS.get(labels.get("cloudy.location")))
+        )
+        return record
+
+    def _sync_state_sync(self) -> dict:
+        """Re-attach the state file to what Docker actually runs.
+
+        Runs on every start-up: guests created by an older version (or lost
+        from the state file) are adopted again, dead entries are dropped and
+        the restart policy is re-applied. This is what keeps the servers
+        alive across a bot update or a full rebuild.
+        """
+        adopted = dropped = repaired = 0
+        servers = self._state.setdefault("servers", {})
+        known = {
+            str(record.get("container_id") or ""): key
+            for key, record in servers.items()
+        }
+
+        for container in self._all_vps_containers():
+            try:
+                container.reload()
+                labels = container.labels or {}
+            except Exception:  # pragma: no cover
+                continue
+            owner_raw = str(labels.get("cloudy.owner") or "")
+            if not owner_raw.isdigit():
+                continue
+            owner_id = int(owner_raw)
+            key = known.get(container.id)
+            if key is None:
+                record = self._record_from_container(container, owner_id, labels)
+                state_key = str(owner_id)
+                existing = servers.get(state_key)
+                if existing and existing.get("container_id") != container.id:
+                    state_key = f"{owner_id}:{container.id[:12]}"
+                servers[state_key] = record
+                known[container.id] = state_key
+                adopted += 1
+            else:
+                record = servers[key]
+                if self._ensure_location(record):
+                    repaired += 1
+                if self._ensure_term(record):
+                    repaired += 1
+            try:
+                policy = (container.attrs.get("HostConfig") or {}).get(
+                    "RestartPolicy"
+                ) or {}
+                if policy.get("Name") != "unless-stopped":
+                    container.update(restart_policy={"Name": "unless-stopped"})
+                    repaired += 1
+            except Exception:  # pragma: no cover
+                pass
+
+        for key in list(servers.keys()):
+            container_id = str(servers[key].get("container_id") or "")
+            if not container_id:
+                servers.pop(key, None)
+                dropped += 1
+                continue
+            try:
+                self.client.containers.get(container_id)
+            except NotFound:
+                servers.pop(key, None)
+                dropped += 1
+            except APIError:  # pragma: no cover
+                pass
+
+        self._save_state()
+        result = {
+            "adopted": adopted,
+            "dropped": dropped,
+            "repaired": repaired,
+            "total": len(servers),
+        }
+        log.info("state sync: %s", result)
+        return result
+
+    async def sync_state(self) -> dict:
+        """Adopt every existing guest into the state file (start-up)."""
+        async with self._lock:
+            return await asyncio.to_thread(self._sync_state_sync)
 
     def _stats_sync(self) -> dict:
         """Live counters for the admin panel: running / stopped / slots."""
@@ -376,8 +575,18 @@ class VPSManager:
         mem_limit = f"{plan['ram_mb']}m"
         memswap = f"{plan['ram_mb'] + plan['swap_mb']}m"
 
+        # 1.4 Beta: system and region chosen in the wizard (steps 1 and 2).
+        os_choice = OS_BY_ID.get(str(opts.get("os_id") or "")) or {}
+        if not os_choice.get("available"):
+            os_choice = OS_BY_ID.get(DEFAULT_OS_ID) or {}
+        image = os_choice.get("image") or VPS_IMAGE
+        if os_choice.get("full"):
+            plan["os"] = os_choice["full"]
+            plan["os_short"] = os_choice["id"]
+        loc = LOCATIONS.get(opts.get("location_id"))
+
         kwargs = dict(
-            image=VPS_IMAGE,
+            image=image,
             name=name,
             hostname=f"cloudy-{user_id % 100000}",
             detach=True,
@@ -406,8 +615,22 @@ class VPSManager:
                 "cloudy.owner": str(user_id),
                 "cloudy.owner_name": username,
                 "cloudy.os": plan["os_short"],
+                "cloudy.os_id": str(os_choice.get("id") or DEFAULT_OS_ID),
+                "cloudy.location": str(loc.get("id") or ""),
             },
             storage_opt={"size": f"{plan['disk_gb']}G"},
+            # Anti-abuse hardening: no raw sockets, kernel modules or clock
+            # changes in the guest, plus process / file-descriptor caps so a
+            # miner or a flood tool cannot exhaust the host.
+            cap_drop=list(GUEST_CAP_DROP),
+            ulimits=[
+                docker.types.Ulimit(
+                    name="nproc", soft=GUEST_MAX_PROCS, hard=GUEST_MAX_PROCS
+                ),
+                docker.types.Ulimit(
+                    name="nofile", soft=GUEST_MAX_FILES, hard=GUEST_MAX_FILES
+                ),
+            ],
         )
 
         try:
@@ -423,6 +646,12 @@ class VPSManager:
             self._install_banner(container, lang)
         except Exception as exc:  # pragma: no cover
             log.warning("could not install banner: %s", exc)
+
+        # Anti-abuse: blackhole the known mining pools inside the guest.
+        try:
+            self._harden_guest(container)
+        except Exception as exc:  # pragma: no cover
+            log.warning("could not harden guest: %s", exc)
 
         # Staff can hand out a named login: !givevps <@user> <username> ...
         if login != "root":
@@ -459,6 +688,8 @@ class VPSManager:
             "term_days": term_days,
             "expires_ts": expires_ts,
             "warned_days": [],
+            "os_id": str(os_choice.get("id") or DEFAULT_OS_ID),
+            **LOCATIONS.record_fields(loc),
         }
         # Staff may own several servers: keep the newest one as the primary
         # record (the one !manage / !destroy work on) and park the previous
@@ -471,9 +702,19 @@ class VPSManager:
         self._save_state()
         return record
 
-    async def create_vps(self, user_id: int, username: str, lang: str = "en") -> dict:
+    async def create_vps(
+        self,
+        user_id: int,
+        username: str,
+        lang: str = "en",
+        location_id: str | None = None,
+        os_id: str | None = None,
+    ) -> dict:
+        overrides = {"location_id": location_id, "os_id": os_id}
         async with self._lock:
-            return await asyncio.to_thread(self._create_sync, user_id, username, lang)
+            return await asyncio.to_thread(
+                self._create_sync, user_id, username, lang, overrides
+            )
 
     async def create_custom(
         self,
@@ -638,8 +879,11 @@ class VPSManager:
         else:
             log.info("banner installed in %s (%s)", container.short_id, guest_lang)
 
-    def _action_sync(self, user_id: int, action: str) -> None:
-        container = self._container(user_id)
+    def _action_sync(self, user_id: int, action: str, key: str | None = None) -> None:
+        if key:
+            container, _record = self._container_for_key(user_id, key)
+        else:
+            container = self._container(user_id)
         if container is None:
             raise VPSError("You do not have a VPS yet. Use `!deploy` to create one.")
         container.reload()
@@ -662,11 +906,24 @@ class VPSManager:
             except Exception as exc:  # pragma: no cover
                 log.warning("could not refresh banner: %s", exc)
 
-    async def power_action(self, user_id: int, action: str) -> None:
+    async def power_action(
+        self, user_id: int, action: str, key: str | None = None
+    ) -> None:
         async with self._lock:
-            await asyncio.to_thread(self._action_sync, user_id, action)
+            await asyncio.to_thread(self._action_sync, user_id, action, key)
 
-    def _delete_sync(self, user_id: int) -> None:
+    def _delete_sync(self, user_id: int, key: str | None = None) -> None:
+        state_key = str(key or user_id)
+        if key and state_key != str(user_id):
+            # Extra server picked in the !servers panel.
+            container, record = self._container_for_key(user_id, key)
+            if record is None:
+                raise VPSError("This server is not yours or no longer exists.")
+            if container is not None:
+                container.remove(force=True)
+            self._state["servers"].pop(state_key, None)
+            self._save_state()
+            return
         container = self._container(user_id)
         if container is not None:
             container.remove(force=True)
@@ -691,9 +948,9 @@ class VPSManager:
 
         self._save_state()
 
-    async def delete_vps(self, user_id: int) -> None:
+    async def delete_vps(self, user_id: int, key: str | None = None) -> None:
         async with self._lock:
-            await asyncio.to_thread(self._delete_sync, user_id)
+            await asyncio.to_thread(self._delete_sync, user_id, key)
 
     async def stop_if_running(self, user_id: int) -> bool:
         """Used by moderation: silently stop a user's server. Returns True if stopped."""
@@ -714,11 +971,17 @@ class VPSManager:
     # ------------------------------------------------------------------
     # Stats
     # ------------------------------------------------------------------
-    def _info_sync(self, user_id: int) -> dict:
-        container = self._container(user_id)
-        record = self.get_record(user_id)
+    def _info_sync(self, user_id: int, key: str | None = None) -> dict:
+        if key:
+            container, record = self._container_for_key(user_id, key)
+        else:
+            container = self._container(user_id)
+            record = self.get_record(user_id)
         if container is None or record is None:
             raise VPSError("You do not have a VPS yet. Use `!deploy` to create one.")
+        # Servers created before 1.4 Beta get a region as well.
+        if self._ensure_location(record):
+            self._save_state()
 
         container.reload()
         attrs = container.attrs
@@ -735,6 +998,12 @@ class VPSManager:
             "name": record["name"],
             "hostname": record.get("hostname") or record["name"],
             "status": status,
+            "state_key": str(key or user_id),
+            "location_id": record.get("location_id") or "",
+            "location": record.get("location") or "",
+            "location_code": record.get("location_code") or "",
+            "location_ping": int(record.get("location_ping") or 0),
+            "os_id": record.get("os_id") or DEFAULT_OS_ID,
             "os": record["os"],
             "ram_limit_mb": record["ram_mb"],
             "swap_mb": record.get("swap_mb", 0),
@@ -803,8 +1072,8 @@ class VPSManager:
 
         return info
 
-    async def get_info(self, user_id: int) -> dict:
-        return await asyncio.to_thread(self._info_sync, user_id)
+    async def get_info(self, user_id: int, key: str | None = None) -> dict:
+        return await asyncio.to_thread(self._info_sync, user_id, key)
 
     # ------------------------------------------------------------------
     # 30-day term (`!deploy` grants the VPS for VPS_LIFETIME_DAYS days)

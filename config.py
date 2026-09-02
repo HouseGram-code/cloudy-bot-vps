@@ -78,8 +78,15 @@ def data_path(name: str, env_var: str = "") -> str:
 # Bot identity
 # ---------------------------------------------------------------------------
 BOT_NAME = "Cloudy VPS Bot"
-BOT_VERSION = "1.3 Beta"
-BOT_FOOTER = f"{BOT_NAME} • v{BOT_VERSION}"
+BOT_VERSION = "1.4 Beta"
+# Pretty test-build badge shown next to the version ("dev", "rc", "stable"...).
+# It is cosmetic only: BOT_BUILD=stable simply changes the label.
+BOT_BUILD = (os.getenv("BOT_BUILD", "dev") or "dev").strip()
+BOT_BUILD_BADGE = (
+    os.getenv("BOT_BUILD_BADGE", "").strip() or f"\u25c6 {BOT_BUILD} build"
+)
+BOT_VERSION_FULL = f"{BOT_VERSION} \u2022 {BOT_BUILD_BADGE}"
+BOT_FOOTER = f"{BOT_NAME} • v{BOT_VERSION} • {BOT_BUILD_BADGE}"
 
 COMMAND_PREFIX = os.getenv("COMMAND_PREFIX", "!")
 
@@ -289,3 +296,96 @@ SSHX_BINARY_BASE = os.getenv("SSHX_BINARY_BASE", "https://sshx.s3.amazonaws.com"
 SSHX_SERVER = os.getenv("SSHX_SERVER", "").strip()
 
 ANIM_DELAY = float(os.getenv("ANIM_DELAY", "0.9"))
+
+# ---------------------------------------------------------------------------
+# 1.4 Beta (dev): regions, OS images, abuse guard, service status
+# ---------------------------------------------------------------------------
+# State files of the new subsystems. They live in DATA_DIR like everything
+# else, so regions, the deploy switch and the guard counters survive an
+# update, a restart or a full container rebuild.
+LOCATIONS_FILE = data_path("locations.json", "LOCATIONS_FILE")
+DEPLOY_LOCK_FILE = data_path("deploy_lock.json", "DEPLOY_LOCK_FILE")
+GUARD_FILE = data_path("guard.json", "GUARD_FILE")
+
+# --- pickable systems (step 2 of the deploy wizard) -------------------------
+# `available` is derived from OS_AVAILABLE: an image only shows up as ready
+# when it is actually built on this host (see images/<id>/Dockerfile).
+OS_AVAILABLE = {
+    item.strip()
+    for item in os.getenv("OS_AVAILABLE", "ubuntu-22.04").split(",")
+    if item.strip()
+}
+OS_CHOICES: list[dict] = [
+    {
+        "id": "ubuntu-22.04",
+        "label": "Ubuntu 22.04 LTS",
+        "codename": "Jammy Jellyfish",
+        "emoji": "\U0001F427",
+        "image": os.getenv("VPS_IMAGE_2204", VPS_IMAGE),
+        "recommended": True,
+    },
+    {
+        "id": "ubuntu-24.04",
+        "label": "Ubuntu 24.04 LTS",
+        "codename": "Noble Numbat",
+        "emoji": "\U0001F427",
+        "image": os.getenv("VPS_IMAGE_2404", "cloudy-vps:ubuntu-24.04"),
+        "recommended": False,
+    },
+    {
+        "id": "ubuntu-20.04",
+        "label": "Ubuntu 20.04 LTS",
+        "codename": "Focal Fossa",
+        "emoji": "\U0001F427",
+        "image": os.getenv("VPS_IMAGE_2004", "cloudy-vps:ubuntu-20.04"),
+        "recommended": False,
+    },
+]
+for _choice in OS_CHOICES:
+    _choice["available"] = _choice["id"] in OS_AVAILABLE
+    _choice["full"] = f"{_choice['label']} ({_choice['codename']})"
+OS_BY_ID = {item["id"]: item for item in OS_CHOICES}
+DEFAULT_OS_ID = (os.getenv("DEFAULT_OS", "ubuntu-22.04") or "").strip()
+if DEFAULT_OS_ID not in OS_BY_ID or not OS_BY_ID[DEFAULT_OS_ID]["available"]:
+    DEFAULT_OS_ID = "ubuntu-22.04"
+
+# --- abuse guard ------------------------------------------------------------
+# Kills crypto miners / attack tools inside the guests, warns the owner and
+# stops the server on a repeat strike. See guard.py.
+GUARD_ENABLED = (os.getenv("GUARD_ENABLED", "1") or "1").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+    "off",
+)
+GUARD_INTERVAL = int(os.getenv("GUARD_INTERVAL", "120"))
+GUARD_STRIKES = int(os.getenv("GUARD_STRIKES", "2"))
+GUARD_STOP_ON_STRIKE = (
+    os.getenv("GUARD_STOP_ON_STRIKE", "1") or "1"
+).strip().lower() not in ("0", "false", "no", "off")
+GUARD_BAN_ON_STRIKE = (
+    os.getenv("GUARD_BAN_ON_STRIKE", "0") or "0"
+).strip().lower() in ("1", "true", "yes", "on")
+GUARD_CPU_WARN = float(os.getenv("GUARD_CPU_WARN", "97"))
+GUARD_CPU_STRIKES = int(os.getenv("GUARD_CPU_STRIKES", "5"))
+
+# Extra kernel capabilities dropped from every guest (anti-abuse hardening).
+GUEST_CAP_DROP = [
+    item.strip()
+    for item in os.getenv(
+        "GUEST_CAP_DROP",
+        "NET_RAW,NET_ADMIN,SYS_ADMIN,SYS_MODULE,SYS_TIME,SYS_RAWIO,MKNOD,AUDIT_WRITE",
+    ).split(",")
+    if item.strip()
+]
+GUEST_MAX_PROCS = int(os.getenv("GUEST_MAX_PROCS", "384"))
+GUEST_MAX_FILES = int(os.getenv("GUEST_MAX_FILES", "4096"))
+
+# --- service status ---------------------------------------------------------
+# `!status` renders a PNG with Pillow; set STATUS_IMAGE=0 for text only.
+STATUS_IMAGE = (os.getenv("STATUS_IMAGE", "1") or "1").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+    "off",
+)

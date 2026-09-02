@@ -36,6 +36,10 @@ MODULES = [
     "plan_store",
     "wallet",
     "token_store",
+    "locations",
+    "deploy_lock",
+    "guard",
+    "statuscard",
     "vps_manager",
     "embeds",
     "views",
@@ -47,6 +51,7 @@ MODULES = [
 REQUIRED_SETTINGS = [
     "BOT_NAME",
     "BOT_VERSION",
+    "BOT_BUILD",
     "COMMAND_PREFIX",
     "PLAN",
     "PLAN_FILE",
@@ -61,6 +66,12 @@ REQUIRED_SETTINGS = [
     "BONUS_COOLDOWN_HOURS",
     "TOTAL_VPS_SLOTS",
     "MAX_VPS_PER_USER",
+    "LOCATIONS_FILE",
+    "DEPLOY_LOCK_FILE",
+    "GUARD_FILE",
+    "DEFAULT_LOCATION_ID",
+    "DEFAULT_OS_ID",
+    "STATUS_IMAGE",
 ]
 
 failures: list[str] = []

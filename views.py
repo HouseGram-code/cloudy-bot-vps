@@ -169,104 +169,6 @@ DEPLOY_STAGES: list[tuple[str, int, str]] = [
 ]
 
 
-class DeployView(OwnerOnlyView):
-    LABEL_KEYS = {"start": "btn.start", "rules": "btn.rules", "cancel": "btn.cancel"}
-
-    def __init__(
-        self,
-        manager: VPSManager,
-        owner_id: int,
-        bans: BanStore | None = None,
-        lang: str = DEFAULT_LANG,
-    ):
-        super().__init__(manager, owner_id, bans, timeout=180, lang=lang)
-
-    @discord.ui.button(label="Start", style=discord.ButtonStyle.success, emoji="\U0001F680")
-    async def start(self, interaction: discord.Interaction, button: discord.ui.Button):
-        lang = self.lang
-        for child in self.children:
-            child.disabled = True
-        await interaction.response.edit_message(
-            embed=embeds.deploy_progress_embed(t(lang, "progress.init"), 3, [], lang),
-            view=self,
-        )
-        message = interaction.message
-
-        # Real work runs in the background while the animation plays.
-        task = asyncio.create_task(
-            self.manager.create_vps(interaction.user.id, str(interaction.user), lang)
-        )
-
-        log_lines: list[str] = []
-        try:
-            for stage_key, percent, line in DEPLOY_STAGES:
-                log_lines.append(line)
-                await message.edit(
-                    embed=embeds.deploy_progress_embed(
-                        t(lang, stage_key), percent, log_lines, lang
-                    ),
-                    view=self,
-                )
-                await asyncio.sleep(ANIM_DELAY)
-            await task
-        except VPSError as exc:
-            await message.edit(embed=embeds.error_embed(str(exc), lang=lang), view=None)
-            return
-        except Exception as exc:  # pragma: no cover
-            log.exception("deploy failed")
-            await message.edit(
-                embed=embeds.error_embed(
-                    t(lang, "deploy.failed", error=exc), lang=lang
-                ),
-                view=None,
-            )
-            return
-
-        info = await self.manager.get_info(interaction.user.id)
-
-        # Deploy just hands over the server and its buttons. Opening a terminal
-        # is a separate, explicit action, so a slow or failing session can no
-        # longer delay or spoil the deployment result.
-        access_status = t(lang, "access.press_button")
-
-        await message.edit(
-            embed=embeds.deploy_progress_embed(
-                t(lang, "progress.finishing"), 100, log_lines, lang
-            ),
-            view=self,
-        )
-        await asyncio.sleep(0.6)
-
-        manage_view = ManageView(self.manager, interaction.user.id, self.bans, lang=lang)
-        await manage_view.refresh_buttons(info)
-        await message.edit(
-            embed=embeds.deploy_success_embed(info, access_status, lang),
-            view=manage_view,
-        )
-        manage_view.message = message
-        self.stop()
-
-    @discord.ui.button(label="Rules", style=discord.ButtonStyle.primary, emoji="\U0001F4DC")
-    async def rules(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(
-            embed=embeds.rules_embed(self.lang), ephemeral=True
-        )
-
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="\u2716\ufe0f")
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        for child in self.children:
-            child.disabled = True
-        await interaction.response.edit_message(
-            embed=embeds.info_embed(
-                f"{EMOJI['cloud']} {t(self.lang, 'cancel.title')}",
-                t(self.lang, "cancel.desc", prefix=COMMAND_PREFIX),
-                COLOR_PRIMARY,
-            ),
-            view=None,
-        )
-        self.stop()
-
-
 # ---------------------------------------------------------------------------
 # !manage
 # ---------------------------------------------------------------------------
@@ -931,3 +833,815 @@ class AdminView(discord.ui.View):
         self, interaction: discord.Interaction, button: discord.ui.Button
     ):
         await self._change_plan(interaction, disk_delta=DISK_STEP)
+
+
+# ---------------------------------------------------------------------------
+# 1.4 Beta (dev): !deploy wizard - region -> Ubuntu -> live progress
+# ---------------------------------------------------------------------------
+from config import DEFAULT_OS_ID, OS_BY_ID, OS_CHOICES  # noqa: E402
+from locations import LOCATIONS, usage_from_records  # noqa: E402
+from locations import plain_title as location_plain  # noqa: E402
+from locations import title as location_title  # noqa: E402
+
+
+def _records_list(manager: VPSManager) -> list:
+    """All VPS records as a plain list (the store may return a dict)."""
+    try:
+        records = manager.all_records()
+    except Exception:  # pragma: no cover
+        return []
+    if isinstance(records, dict):
+        return list(records.values())
+    return list(records or [])
+
+
+def _region_stages(loc: dict) -> list[tuple[str, int, str]]:
+    """DEPLOY_STAGES with the chosen region woven into the build log."""
+    code = str(loc.get("code") or "-")
+    ping = int(loc.get("ping") or 0)
+    stages = list(DEPLOY_STAGES)
+    stages[0] = (
+        stages[0][0],
+        stages[0][1],
+        f"\u001b[0;36m[cloudy]\u001b[0m region {code} \u00b7 reserving vCPU / RAM slice",
+    )
+    stages[4] = (
+        stages[4][0],
+        stages[4][1],
+        f"\u001b[0;36m[net]\u001b[0m {code} bridge attached \u00b7 rtt {ping} ms \u00b7 DNS ready",
+    )
+    return stages
+
+
+class _LocationSelect(discord.ui.Select):
+    """Step 1: five regions with live ping and a colored status."""
+
+    def __init__(self, wizard: "DeployView"):
+        self.wizard = wizard
+        lang = wizard.lang
+        options = []
+        for item in wizard.locations:
+            capacity = int(item.get("capacity") or 0)
+            free = max(0, capacity - int(item.get("used") or 0))
+            tail = (
+                t(lang, "loc.free", free=free, total=capacity)
+                if item.get("available")
+                else t(lang, "loc.reopen", minutes=int(item.get("reopen_minutes") or 5))
+            )
+            description = (
+                f"{item.get('emoji', '')} {int(item.get('ping') or 0)} ms \u00b7 "
+                f"{t(lang, item.get('status_key') or 'loc.status_ok')} \u00b7 {tail}"
+            )
+            options.append(
+                discord.SelectOption(
+                    label=location_plain(item, lang)[:100],
+                    value=str(item["id"]),
+                    description=description[:100],
+                    emoji=item.get("flag") or None,
+                    default=str(item["id"]) == str(wizard.location_id or ""),
+                )
+            )
+        super().__init__(
+            placeholder=t(lang, "loc.picker"),
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await self.wizard.choose_location(interaction, self.values[0])
+
+
+class _OSSelect(discord.ui.Select):
+    """Step 2: the Ubuntu release."""
+
+    def __init__(self, wizard: "DeployView"):
+        self.wizard = wizard
+        lang = wizard.lang
+        options = []
+        for item in OS_CHOICES:
+            note = (
+                t(lang, "os.recommended")
+                if item.get("available") and item.get("recommended")
+                else ("" if item.get("available") else t(lang, "os.soon"))
+            )
+            description = f"{item.get('codename', '')}"
+            if note:
+                description = f"{description} \u00b7 {note}"
+            options.append(
+                discord.SelectOption(
+                    label=str(item.get("label") or item["id"])[:100],
+                    value=str(item["id"]),
+                    description=description[:100],
+                    emoji=item.get("emoji") or None,
+                    default=str(item["id"]) == str(wizard.os_id or ""),
+                )
+            )
+        super().__init__(
+            placeholder=t(lang, "os.picker"),
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await self.wizard.choose_os(interaction, self.values[0])
+
+
+class _WizardButton(discord.ui.Button):
+    def __init__(
+        self,
+        wizard: "DeployView",
+        action: str,
+        label: str,
+        style: discord.ButtonStyle,
+        emoji: str | None = None,
+        row: int = 1,
+    ):
+        super().__init__(label=label, style=style, emoji=emoji, row=row)
+        self.wizard = wizard
+        self.action = action
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await self.wizard.handle(interaction, self.action)
+
+
+class DeployView(OwnerOnlyView):
+    """`!deploy` wizard: pick a region, pick Ubuntu, watch it being built."""
+
+    def __init__(
+        self,
+        manager: VPSManager,
+        owner_id: int,
+        bans: BanStore | None = None,
+        lang: str = DEFAULT_LANG,
+        stats: dict | None = None,
+    ):
+        super().__init__(manager, owner_id, bans, timeout=300, lang=lang)
+        self.stats = stats or {}
+        self.locations = LOCATIONS.all()
+        best = LOCATIONS.pick_best()
+        self.location_id = best["id"] if best.get("available") else None
+        self.os_id = DEFAULT_OS_ID
+        self.step = "location"
+        self._build()
+
+    # ------------------------------------------------------------------
+    @property
+    def location(self) -> dict:
+        return LOCATIONS.get(self.location_id)
+
+    @property
+    def os_choice(self) -> dict:
+        return OS_BY_ID.get(self.os_id) or OS_BY_ID[DEFAULT_OS_ID]
+
+    def _build(self) -> None:
+        """Rebuild the buttons for the current step."""
+        self.clear_items()
+        lang = self.lang
+        if self.step == "location":
+            self.add_item(_LocationSelect(self))
+            self.add_item(
+                _WizardButton(
+                    self,
+                    "refresh",
+                    t(lang, "btn.refresh_loc"),
+                    discord.ButtonStyle.secondary,
+                    "\U0001F503",
+                    1,
+                )
+            )
+            self.add_item(
+                _WizardButton(
+                    self, "rules", t(lang, "btn.rules"), discord.ButtonStyle.primary, "\U0001F4DC", 1
+                )
+            )
+            self.add_item(
+                _WizardButton(
+                    self,
+                    "cancel",
+                    t(lang, "btn.cancel"),
+                    discord.ButtonStyle.secondary,
+                    "\u2716\ufe0f",
+                    1,
+                )
+            )
+            return
+        if self.step == "os":
+            self.add_item(_OSSelect(self))
+            self.add_item(
+                _WizardButton(
+                    self,
+                    "back_location",
+                    t(lang, "btn.back"),
+                    discord.ButtonStyle.secondary,
+                    "\u2B05\ufe0f",
+                    1,
+                )
+            )
+            self.add_item(
+                _WizardButton(
+                    self,
+                    "cancel",
+                    t(lang, "btn.cancel"),
+                    discord.ButtonStyle.secondary,
+                    "\u2716\ufe0f",
+                    1,
+                )
+            )
+            return
+        self.add_item(
+            _WizardButton(
+                self, "deploy", t(lang, "btn.deploy"), discord.ButtonStyle.success, "\U0001F680", 0
+            )
+        )
+        self.add_item(
+            _WizardButton(
+                self, "back_os", t(lang, "btn.back"), discord.ButtonStyle.secondary, "\u2B05\ufe0f", 0
+            )
+        )
+        self.add_item(
+            _WizardButton(
+                self, "rules", t(lang, "btn.rules"), discord.ButtonStyle.primary, "\U0001F4DC", 1
+            )
+        )
+        self.add_item(
+            _WizardButton(
+                self,
+                "cancel",
+                t(lang, "btn.cancel"),
+                discord.ButtonStyle.secondary,
+                "\u2716\ufe0f",
+                1,
+            )
+        )
+
+    def render(self, user: discord.abc.User) -> discord.Embed:
+        """Embed of the current step."""
+        if self.step == "location":
+            return embeds.deploy_location_embed(user, self.lang, self.locations, self.stats)
+        if self.step == "os":
+            return embeds.deploy_os_embed(self.location, self.lang)
+        return embeds.deploy_confirm_embed(
+            self.location, self.os_choice, self.lang, self.stats
+        )
+
+    # ------------------------------------------------------------------
+    async def choose_location(self, interaction: discord.Interaction, loc_id: str) -> None:
+        loc = LOCATIONS.get(loc_id)
+        if not loc.get("available"):
+            # Saturated region: it reopens by itself within 5-15 minutes.
+            await interaction.response.send_message(
+                embed=embeds.error_embed(
+                    t(
+                        self.lang,
+                        "loc.unavailable",
+                        loc=location_title(loc, self.lang),
+                        minutes=int(loc.get("reopen_minutes") or 5),
+                    ),
+                    title=t(self.lang, "loc.unavailable_title"),
+                    lang=self.lang,
+                ),
+                ephemeral=True,
+            )
+            return
+        self.location_id = loc["id"]
+        self.step = "os"
+        self._build()
+        await interaction.response.edit_message(
+            embed=self.render(interaction.user), view=self
+        )
+
+    async def choose_os(self, interaction: discord.Interaction, os_id: str) -> None:
+        choice = OS_BY_ID.get(os_id) or {}
+        if not choice.get("available"):
+            await interaction.response.send_message(
+                embed=embeds.error_embed(
+                    t(self.lang, "os.unavailable", os=choice.get("label") or os_id),
+                    title=t(self.lang, "os.unavailable_title"),
+                    lang=self.lang,
+                ),
+                ephemeral=True,
+            )
+            return
+        self.os_id = str(os_id)
+        self.step = "confirm"
+        self._build()
+        await interaction.response.edit_message(
+            embed=self.render(interaction.user), view=self
+        )
+
+    async def handle(self, interaction: discord.Interaction, action: str) -> None:
+        lang = self.lang
+        if action == "rules":
+            await interaction.response.send_message(
+                embed=embeds.rules_embed(lang), ephemeral=True
+            )
+            return
+        if action == "cancel":
+            for child in self.children:
+                child.disabled = True
+            await interaction.response.edit_message(
+                embed=embeds.info_embed(
+                    f"{EMOJI['cloud']} {t(lang, 'cancel.title')}",
+                    t(lang, "cancel.desc", prefix=COMMAND_PREFIX),
+                    COLOR_PRIMARY,
+                ),
+                view=None,
+            )
+            self.stop()
+            return
+        if action == "refresh":
+            await interaction.response.defer()
+            self.locations = await LOCATIONS.refresh(
+                usage_from_records(_records_list(self.manager)), force=True
+            )
+            if self.location_id and not LOCATIONS.available(self.location_id):
+                self.location_id = None
+            self.step = "location"
+            self._build()
+            await interaction.edit_original_response(
+                embed=self.render(interaction.user), view=self
+            )
+            return
+        if action in ("back_location", "back_os"):
+            self.step = "location" if action == "back_location" else "os"
+            if self.step == "location":
+                self.locations = LOCATIONS.all()
+            self._build()
+            await interaction.response.edit_message(
+                embed=self.render(interaction.user), view=self
+            )
+            return
+        if action == "deploy":
+            await self._deploy(interaction)
+
+    # ------------------------------------------------------------------
+    async def _deploy(self, interaction: discord.Interaction) -> None:
+        lang = self.lang
+        loc = self.location
+        if not loc.get("available"):
+            self.step = "location"
+            self.locations = LOCATIONS.all()
+            self._build()
+            await interaction.response.edit_message(
+                embed=self.render(interaction.user), view=self
+            )
+            return
+
+        for child in self.children:
+            child.disabled = True
+        label = f"{loc.get('emoji', '')} {location_title(loc, lang)}"
+        await interaction.response.edit_message(
+            embed=embeds.deploy_progress_embed(
+                t(lang, "stage.region", loc=location_title(loc, lang)),
+                3,
+                [],
+                lang,
+                location=label,
+            ),
+            view=self,
+        )
+        message = interaction.message
+
+        # Real work runs in the background while the animation plays.
+        task = asyncio.create_task(
+            self.manager.create_vps(
+                interaction.user.id,
+                str(interaction.user),
+                lang,
+                location_id=loc["id"],
+                os_id=self.os_id,
+            )
+        )
+
+        log_lines: list[str] = []
+        try:
+            for stage_key, percent, line in _region_stages(loc):
+                log_lines.append(line)
+                await message.edit(
+                    embed=embeds.deploy_progress_embed(
+                        t(lang, stage_key), percent, log_lines, lang, location=label
+                    ),
+                    view=self,
+                )
+                await asyncio.sleep(ANIM_DELAY)
+            await task
+        except VPSError as exc:
+            await message.edit(embed=embeds.error_embed(str(exc), lang=lang), view=None)
+            return
+        except Exception as exc:  # pragma: no cover
+            log.exception("deploy failed")
+            await message.edit(
+                embed=embeds.error_embed(t(lang, "deploy.failed", error=exc), lang=lang),
+                view=None,
+            )
+            return
+
+        info = await self.manager.get_info(interaction.user.id)
+        access_status = t(lang, "access.press_button")
+
+        await message.edit(
+            embed=embeds.deploy_progress_embed(
+                t(lang, "progress.finishing"), 100, log_lines, lang, location=label
+            ),
+            view=self,
+        )
+        await asyncio.sleep(0.6)
+
+        manage_view = ManageView(self.manager, interaction.user.id, self.bans, lang=lang)
+        await manage_view.refresh_buttons(info)
+        await message.edit(
+            embed=embeds.deploy_success_embed(info, access_status, lang),
+            view=manage_view,
+        )
+        manage_view.message = message
+        self.stop()
+
+
+# ---------------------------------------------------------------------------
+# 1.4 Beta (dev): !servers - how many machines you have + per-server panel
+# ---------------------------------------------------------------------------
+class _ServerSelect(discord.ui.Select):
+    def __init__(self, listing: "ServersView"):
+        self.listing = listing
+        lang = listing.lang
+        options = []
+        for index, (key, record) in enumerate(listing.records[:25], start=1):
+            loc = LOCATIONS.get(record.get("location_id"))
+            description = (
+                f"{location_plain(loc, lang)} \u00b7 {int(record.get('ram_mb') or 0)} MB "
+                f"\u00b7 {int(record.get('disk_gb') or 0)} GB"
+            )
+            options.append(
+                discord.SelectOption(
+                    label=str(record.get("name") or f"server {index}")[:100],
+                    value=str(key),
+                    description=description[:100],
+                    emoji=loc.get("flag") or None,
+                )
+            )
+        super().__init__(
+            placeholder=t(lang, "servers.picker"),
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await self.listing.open_panel(interaction, self.values[0])
+
+
+class ServersView(OwnerOnlyView):
+    """`!servers`: pick one of your machines and open its panel."""
+
+    def __init__(
+        self,
+        manager: VPSManager,
+        owner_id: int,
+        bans: BanStore | None = None,
+        lang: str = DEFAULT_LANG,
+        records: list | None = None,
+        stats: dict | None = None,
+    ):
+        super().__init__(manager, owner_id, bans, timeout=300, lang=lang)
+        self.records = list(records or [])
+        self.stats = stats or {}
+        if self.records:
+            self.add_item(_ServerSelect(self))
+
+    def render(self, user: discord.abc.User) -> discord.Embed:
+        return embeds.servers_list_embed(
+            user, [record for _key, record in self.records], self.lang, self.stats
+        )
+
+    async def reload(self) -> None:
+        self.records = list(self.manager.records_of(self.owner_id))
+        self.clear_items()
+        if self.records:
+            self.add_item(_ServerSelect(self))
+
+    async def open_panel(self, interaction: discord.Interaction, key: str) -> None:
+        lang = self.lang
+        await interaction.response.defer()
+        try:
+            info = await self.manager.get_info(interaction.user.id, key=key)
+        except VPSError as exc:
+            await interaction.followup.send(
+                embed=embeds.error_embed(str(exc), lang=lang), ephemeral=True
+            )
+            return
+        panel = ServerPanelView(
+            self.manager, interaction.user.id, self.bans, lang=lang, key=key, parent=self
+        )
+        await panel.refresh_buttons(info)
+        await interaction.edit_original_response(
+            embed=embeds.manage_embed(info, lang), view=panel
+        )
+        panel.message = interaction.message
+
+
+class _PanelButton(discord.ui.Button):
+    def __init__(
+        self,
+        panel: "ServerPanelView",
+        action: str,
+        label: str,
+        style: discord.ButtonStyle,
+        emoji: str | None = None,
+        row: int = 0,
+        custom_id: str | None = None,
+    ):
+        super().__init__(label=label, style=style, emoji=emoji, row=row, custom_id=custom_id)
+        self.panel = panel
+        self.action = action
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await self.panel.handle(interaction, self.action)
+
+
+class ServerPanelView(OwnerOnlyView):
+    """Panel of one selected server: power, web terminal, delete."""
+
+    def __init__(
+        self,
+        manager: VPSManager,
+        owner_id: int,
+        bans: BanStore | None = None,
+        lang: str = DEFAULT_LANG,
+        key: str = "",
+        parent: ServersView | None = None,
+    ):
+        super().__init__(manager, owner_id, bans, timeout=600, lang=lang)
+        self.key = str(key)
+        self.parent_view = parent
+        self.confirm = False
+        self._build()
+
+    # ------------------------------------------------------------------
+    def _build(self) -> None:
+        self.clear_items()
+        lang = self.lang
+        if self.confirm:
+            self.add_item(
+                _PanelButton(
+                    self,
+                    "delete_yes",
+                    t(lang, "btn.delete_yes"),
+                    discord.ButtonStyle.danger,
+                    "\U0001F5D1\ufe0f",
+                    0,
+                    "panel_delete_yes",
+                )
+            )
+            self.add_item(
+                _PanelButton(
+                    self,
+                    "delete_no",
+                    t(lang, "btn.cancel"),
+                    discord.ButtonStyle.secondary,
+                    "\u2716\ufe0f",
+                    0,
+                    "panel_delete_no",
+                )
+            )
+            return
+        self.add_item(
+            _PanelButton(
+                self, "start", t(lang, "btn.start"), discord.ButtonStyle.success, "\u25B6\ufe0f", 0, "panel_start"
+            )
+        )
+        self.add_item(
+            _PanelButton(
+                self, "stop", t(lang, "btn.stop"), discord.ButtonStyle.danger, "\u23F9\ufe0f", 0, "panel_stop"
+            )
+        )
+        self.add_item(
+            _PanelButton(
+                self,
+                "restart",
+                t(lang, "btn.restart"),
+                discord.ButtonStyle.primary,
+                "\U0001F504",
+                0,
+                "panel_restart",
+            )
+        )
+        self.add_item(
+            _PanelButton(
+                self, "sshx", t(lang, "btn.sshx"), discord.ButtonStyle.primary, "\U0001F310", 1, "panel_sshx"
+            )
+        )
+        self.add_item(
+            _PanelButton(
+                self,
+                "refresh",
+                t(lang, "btn.refresh"),
+                discord.ButtonStyle.secondary,
+                "\U0001F501",
+                1,
+                "panel_refresh",
+            )
+        )
+        self.add_item(
+            _PanelButton(
+                self,
+                "delete",
+                t(lang, "btn.delete"),
+                discord.ButtonStyle.danger,
+                "\U0001F5D1\ufe0f",
+                2,
+                "panel_delete",
+            )
+        )
+        if self.parent_view is not None:
+            self.add_item(
+                _PanelButton(
+                    self,
+                    "back",
+                    t(lang, "btn.back"),
+                    discord.ButtonStyle.secondary,
+                    "\u2B05\ufe0f",
+                    2,
+                    "panel_back",
+                )
+            )
+
+    async def refresh_buttons(self, info: dict) -> None:
+        running = info.get("status") == "running"
+        primary = self.key == str(self.owner_id)
+        for child in self.children:
+            if not isinstance(child, discord.ui.Button):
+                continue
+            if child.custom_id == "panel_start":
+                child.disabled = running
+            elif child.custom_id in ("panel_stop", "panel_restart"):
+                child.disabled = not running
+            elif child.custom_id == "panel_sshx":
+                # The terminal helper works on the user's primary server.
+                child.disabled = (not running) or (not primary)
+            else:
+                child.disabled = False
+
+    async def _info(self, interaction: discord.Interaction) -> dict | None:
+        try:
+            return await self.manager.get_info(interaction.user.id, key=self.key)
+        except VPSError as exc:
+            await interaction.followup.send(
+                embed=embeds.error_embed(str(exc), lang=self.lang), ephemeral=True
+            )
+            return None
+
+    # ------------------------------------------------------------------
+    async def handle(self, interaction: discord.Interaction, action: str) -> None:
+        lang = self.lang
+        if action == "sshx":
+            await self._open_terminal(interaction)
+            return
+
+        if action == "back" and self.parent_view is not None:
+            await interaction.response.defer()
+            await self.parent_view.reload()
+            await interaction.edit_original_response(
+                embed=self.parent_view.render(interaction.user), view=self.parent_view
+            )
+            self.parent_view.message = interaction.message
+            self.stop()
+            return
+
+        await interaction.response.defer()
+
+        if action == "refresh":
+            info = await self._info(interaction)
+            if info is None:
+                return
+            await self.refresh_buttons(info)
+            await interaction.edit_original_response(
+                embed=embeds.manage_embed(info, lang), view=self
+            )
+            return
+
+        if action == "delete":
+            info = await self._info(interaction)
+            if info is None:
+                return
+            self.confirm = True
+            self._build()
+            await interaction.edit_original_response(
+                embed=embeds.server_delete_confirm_embed(info, lang), view=self
+            )
+            return
+
+        if action == "delete_no":
+            self.confirm = False
+            self._build()
+            info = await self._info(interaction)
+            if info is None:
+                return
+            await self.refresh_buttons(info)
+            await interaction.edit_original_response(
+                embed=embeds.manage_embed(info, lang), view=self
+            )
+            await interaction.followup.send(
+                embed=embeds.info_embed(
+                    f"{EMOJI['check']} {t(lang, 'servers.delete_cancelled')}",
+                    t(lang, "servers.hint"),
+                    COLOR_PRIMARY,
+                ),
+                ephemeral=True,
+            )
+            return
+
+        if action == "delete_yes":
+            info = await self._info(interaction)
+            name = (info or {}).get("name", "-")
+            try:
+                await self.manager.delete_vps(interaction.user.id, key=self.key)
+            except VPSError as exc:
+                await interaction.followup.send(
+                    embed=embeds.error_embed(str(exc), lang=lang), ephemeral=True
+                )
+                return
+            except Exception as exc:  # pragma: no cover
+                log.exception("panel delete failed")
+                await interaction.followup.send(
+                    embed=embeds.error_embed(f"`{exc}`", lang=lang), ephemeral=True
+                )
+                return
+            await interaction.edit_original_response(
+                embed=embeds.server_deleted_embed(name, lang), view=None
+            )
+            self.stop()
+            return
+
+        # start / stop / restart
+        verb_keys = {
+            "start": "manage.started",
+            "stop": "manage.stopped",
+            "restart": "manage.restarted",
+        }
+        if action not in verb_keys:
+            return
+        try:
+            await self.manager.power_action(interaction.user.id, action, key=self.key)
+        except VPSError as exc:
+            await interaction.followup.send(
+                embed=embeds.error_embed(str(exc), lang=lang), ephemeral=True
+            )
+            return
+        except Exception as exc:  # pragma: no cover
+            log.exception("panel %s failed", action)
+            await interaction.followup.send(
+                embed=embeds.error_embed(f"`{exc}`", lang=lang), ephemeral=True
+            )
+            return
+
+        await asyncio.sleep(1.5)
+        info = await self._info(interaction)
+        if info is None:
+            return
+        await self.refresh_buttons(info)
+        await interaction.edit_original_response(
+            embed=embeds.manage_embed(info, lang), view=self
+        )
+        await interaction.followup.send(
+            embed=embeds.info_embed(
+                f"{EMOJI['check']} {t(lang, verb_keys[action])}",
+                t(lang, "manage.now_status", name=info["name"], status=info["status"]),
+                COLOR_PRIMARY,
+            ),
+            ephemeral=True,
+        )
+
+    async def _open_terminal(self, interaction: discord.Interaction) -> None:
+        lang = self.lang
+        await interaction.response.defer(ephemeral=True)
+        try:
+            link = await self.manager.get_sshx(
+                interaction.user.id, force_new=True, lang=lang
+            )
+        except asyncio.TimeoutError:
+            await interaction.followup.send(
+                embed=embeds.error_embed(t(lang, "sshx.timeout"), lang=lang),
+                ephemeral=True,
+            )
+            return
+        except VPSError as exc:
+            await interaction.followup.send(
+                embed=embeds.error_embed(str(exc), lang=lang), ephemeral=True
+            )
+            return
+        info = await self.manager.get_info(interaction.user.id)
+        sent = await deliver_sshx(interaction.user, info, link, interaction, lang)
+        if sent:
+            await interaction.followup.send(
+                embed=embeds.info_embed(
+                    f"{EMOJI['mail']} {t(lang, 'sshx.check_dms_title')}",
+                    t(lang, "sshx.check_dms_desc"),
+                    COLOR_PRIMARY,
+                ),
+                ephemeral=True,
+            )

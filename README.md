@@ -1,4 +1,4 @@
-# Cloudy VPS Bot — v1.3 Beta
+# Cloudy VPS Bot — v1.4 Beta ◆ dev build
 
 A Discord bot that hands out **free VPS** instances (Docker containers running
 **Ubuntu 22.04 LTS**) with a **browser terminal**, a pretty deployment animation,
@@ -10,6 +10,22 @@ and a button-based control panel.
 
 ---
 
+## What's new in 1.4 Beta ◆ dev
+
+| Change | Details |
+|---|---|
+| **Five regions with a live ping** | `!deploy` now opens with a **region picker**: 🇺🇸 New York, 🇺🇸 Fremont, 🇩🇪 Frankfurt, 🇬🇧 London, 🇸🇬 Singapore. Every row shows a measured TCP ping and a colour — 🟩 normal, 🟨 under load / high ping, 🟥 unavailable. |
+| **Regions close and reopen by themselves** | A saturated region goes offline for **5–15 minutes** (`LOCATION_CLOSE_MIN` / `LOCATION_CLOSE_MAX`) and opens again on its own. The board is re-measured every minute (`LOCATION_REFRESH`). |
+| **Deploy wizard** | Region → **Ubuntu 22.04 LTS** → animated build. The chosen region is printed while the server is being created, on the success card, in `!manage`, `!specs` and on the server panel. |
+| **`!servers` for everyone** | One command shows how many machines you own, a dropdown picks one and opens its panel: start / stop / restart / web terminal / **delete**. `!servers all` is still the staff-wide listing. |
+| **`!deploylock`** | **Staff.** `!deploylock on 30 maintenance` closes `!deploy` for everybody (optional timer + reason), `!deploylock off` opens it again, `!deploylock status` prints the current state. Staff can still deploy while it is closed. |
+| **`!status` service card** | A generated **PNG** (Pillow) with 🟩 normal / 🟨 under load / 🟥 outage for the Discord gateway, virtualization, deployments, web terminal, abuse guard, storage and all five regions — service health only, no disk/RAM charts. Falls back to a text embed when Pillow or a Unicode font is missing. |
+| **Servers survive updates** | On boot the bot **re-adopts every `cloudy.vps` container** straight from Docker: records are rebuilt from container labels, stale entries are dropped and `restart: unless-stopped` is re-applied. Rebuilding or restarting the bot no longer loses machines. |
+| **Anti-abuse guard** | A sweep every two minutes hunts miners (xmrig, t-rex, phoenixminer…), attack tools and **mining-pool ports**, kills the processes, DMs the owner, reports to staff and stops repeat offenders. New guests also drop dangerous Linux capabilities and get process/file limits, and known pool hosts are blackholed inside the container. |
+| **Pretty test build** | The version is now **v1.4 Beta** with a `◆ dev build` badge in every footer (`BOT_BUILD`, `BOT_BUILD_BADGE`). |
+
+---
+
 ## What's new in 1.3 Beta
 
 | Change | Details |
@@ -17,7 +33,7 @@ and a button-based control panel.
 | **Crash fixed** | `Deployment failed: [Errno 13] Permission denied: '/app'`. `config.py` now resolves a **writable** data directory (`DATA_DIR` → `./data` → `~/.cloudy-vps` → temp dir) and every store (`state`, `wallet`, `bans`, `languages`, `slots`, `plan`, `maintenance`) saves through it. `vps_manager` also survives a read-only disk instead of failing the deploy. |
 | **No more leaf limits** | Leaves no longer gate `!deploy`, `!manage` or uptime: `LEAVES_ENABLED=0` by default, the billing loop does not even start, and the profile card shows an unlimited badge. Set `LEAVES_ENABLED=1` to bring the old economy back. |
 | **30-day free term** | Every server is granted for **30 days** (`VPS_LIFETIME_DAYS`). `!deploy` shows the term before and after the build, `!manage` / `!specs` show the days left, DM reminders arrive 7 / 3 / 1 days before the end, and expired servers are released automatically (`VPS_EXPIRY_ACTION=delete` or `stop`). |
-| **Real tmate.io SSH is back** | `!ssh` (and the green **SSH** button in `!manage`) starts a genuine `ssh.tmate.io` session and **DMs it privately** — the command never appears in the channel. The browser terminal (`!sshx`) stays as a fallback. |
+| **Browser terminal only** | The tmate/SSH experiment was **removed** in the final 1.3 build — outbound `2200` and `22` are blocked on most hosts, so `!sshx` (sshx.io over plain HTTPS) is the single way into a VPS. |
 | **New `!specs`** | VPS username (`root`), hostname, RAM (used / limit + bar), disk, swap, vCPU, OS, traffic, uptime, server ID and the remaining term. Staff can check anyone: `!specs @user`. |
 | **New `!renew`** | **Staff.** `!renew @user 30` extends a term, `!renew @user 0` makes it unlimited. The owner gets a DM. |
 | **Admin panel fixed** | Buttons acknowledge the click *before* touching the stores (no more "This interaction failed"), every store error is reported instead of freezing the panel, the panel re-renders from a fallback when the response expires, limit-reached clicks no longer post a bogus confirmation, and the panel shows the VPS term. |
@@ -29,7 +45,7 @@ and a button-based control panel.
 
 | Command | What it does |
 |---|---|
-| `!deploy` | Shows the free plan specs (RAM, swap, vCPU, disk, OS, bandwidth, access) with a **Start** button. Pressing Start plays an animated progress bar and then reveals the live server + web-terminal link. |
+| `!deploy` | Free-plan specs (RAM, swap, vCPU, disk, OS, bandwidth, access), then the **region picker** (5 locations with live ping colours) → **Ubuntu 22.04 LTS** → animated build → the live server + web-terminal link. Can be closed by staff with `!deploylock`. |
 | `!manage` | Live control panel: status, RAM usage bar, CPU usage bar, disk, OS, network I/O, uptime, server ID + buttons **Start / Stop / Restart / Web terminal / Refresh**. |
 | `!specs` • `!инфо` | Full server card: **VPS username**, hostname, **RAM**, **disk**, swap, vCPU, OS, traffic, uptime, server ID and the days left of the 30-day term. `!specs @user` for staff. |
 | `!renew <@user\|id> [days]` | **Staff.** Extends the VPS term (`0` = unlimited). |
@@ -39,8 +55,10 @@ and a button-based control panel.
 | `!ban <@user\|id> [reason]` | **Staff.** Blocks the user, stops their server, DMs them the reason. |
 | `!unban <@user\|id>` | **Staff.** Restores access and DMs the user. |
 | `!bans` | **Staff.** List of all bans with reason and moderator. |
-| `!sshx` • `!веб` | Browser terminal link (sshx.io) — the second way into the same VPS. |
-| `!servers` | **Staff.** All deployed servers and their owners. |
+| `!sshx` • `!веб` | Browser terminal link (sshx.io) — the only way into the VPS. |
+| `!servers` • `!мои` | Your machines: a dropdown opens the panel of the selected server (start / stop / restart / web terminal / **delete**). `!servers all` is the **staff** listing of every deployed server and its owner. |
+| `!status` • `!статус` | Generated service-status card: 🟩 normal, 🟨 under load, 🟥 outage for the gateway, virtualization, deployments, terminal, guard, storage and the five regions. |
+| `!deploylock on\|off\|status [minutes] [reason]` | **Staff.** Closes or opens `!deploy` for everyone. |
 | `!plan` | **Staff.** Show the free-tier resources; `!plan ram 4096`, `!plan disk 30`, `!plan cpu 2`, `!plan reset` change them live. |
 | `!ping` | Latency check. |
 | `!lang` / `!язык` | Language picker (🇷🇺 Русский / 🇬🇧 English). Also `!lang ru`, `!lang en`. |
