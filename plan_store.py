@@ -23,8 +23,18 @@ PLAN = config.PLAN
 # A half-updated deployment (new modules + an old config.py) used to crash
 # with `ImportError: cannot import name 'PLAN_FILE'`. Never hard-fail on a
 # missing setting - fall back to the environment and then to the default.
-PLAN_FILE = getattr(config, "PLAN_FILE", None) or os.getenv(
-    "PLAN_FILE", "/app/data/plan.json"
+def _fallback_path(name: str) -> str:
+    """Writable path for a state file (never the container-only /app/data)."""
+    resolver = getattr(config, "data_path", None)
+    if callable(resolver):
+        return resolver(name)
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", name)
+
+
+PLAN_FILE = (
+    getattr(config, "PLAN_FILE", None)
+    or os.getenv("PLAN_FILE")
+    or _fallback_path("plan.json")
 )
 
 # Safety rails: the host cannot hand out more than it has.

@@ -35,30 +35,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         tzdata \
     && rm -rf /var/lib/apt/lists/*
 
-# ---- tmate (SSH access without port forwarding) ----
-# 1) try the distro package (Ubuntu 22.04 universe ships tmate)
-RUN apt-get update \
-    && (apt-get install -y --no-install-recommends tmate \
-        || echo "tmate not available via apt, falling back to static build") \
-    && rm -rf /var/lib/apt/lists/*
-
-# 2) fall back to the official static build if apt did not provide it
-ARG TMATE_VERSION=2.4.0
-RUN set -eux; \
-    if command -v tmate >/dev/null 2>&1; then echo "tmate already installed"; exit 0; fi; \
-    arch="$(dpkg --print-architecture)"; \
-    case "$arch" in \
-        amd64) tarch="amd64" ;; \
-        arm64) tarch="arm64v8" ;; \
-        armhf) tarch="arm32v7" ;; \
-        *) echo "unsupported arch: $arch" && exit 1 ;; \
-    esac; \
-    base="https://github.com/tmate-io/tmate/releases/download"; \
-    wget -qO /tmp/tmate.tar.xz "${base}/${TMATE_VERSION}/tmate-${TMATE_VERSION}-static-linux-${tarch}.tar.xz"; \
-    tar -xf /tmp/tmate.tar.xz -C /tmp; \
-    mv /tmp/tmate-${TMATE_VERSION}-static-linux-${tarch}/tmate /usr/local/bin/tmate; \
-    chmod +x /usr/local/bin/tmate; \
-    rm -rf /tmp/tmate*
 
 # ---- sshx (browser terminal, second access method) ----
 # Official statically linked musl build. The bot can also install it at
@@ -91,7 +67,7 @@ RUN set -eux; \
     : > /etc/legal 2>/dev/null || true; \
     touch /root/.hushlogin; \
     mkdir -p /etc/profile.d; \
-    # cloudy-login is what the tmate session executes, so the banner is shown
+    # cloudy-login is what the web terminal executes, so the banner is shown
     # even if ~/.bashrc is never sourced by the login shell.
     printf '%s\n' \
         '#!/bin/bash' \
@@ -126,8 +102,6 @@ RUN set -eux; \
     bash -n /usr/local/bin/cloudy-login; \
     /usr/local/bin/cloudy-banner > /dev/null
 
-# Verify tmate really made it into the image (fail the build early if not)
-RUN tmate -V
 
 WORKDIR /root
 

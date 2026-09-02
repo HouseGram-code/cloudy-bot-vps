@@ -17,7 +17,17 @@ DEFAULT_LANG = os.getenv("DEFAULT_LANG", "en").lower()
 if DEFAULT_LANG not in ("en", "ru"):
     DEFAULT_LANG = "en"
 
-LANG_FILE = os.getenv("LANG_FILE", "/app/data/languages.json")
+# The language file used to default to `/app/data/languages.json`, which only
+# exists inside the container. config.data_path() picks a folder we can really
+# write to, so a host install no longer dies with "Permission denied: '/app'".
+try:  # keep working even next to a very old config.py
+    from config import data_path as _data_path
+
+    LANG_FILE = _data_path("languages.json", "LANG_FILE")
+except Exception:  # pragma: no cover - stand-alone use
+    LANG_FILE = os.getenv("LANG_FILE") or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "data", "languages.json"
+    )
 
 LANGUAGES: dict[str, dict[str, str]] = {
     "en": {"name": "English", "flag": "\U0001F1EC\U0001F1E7"},
@@ -132,7 +142,7 @@ STRINGS: dict[str, dict[str, str]] = {
     "stage.boot": {"en": "Booting the machine\u2026", "ru": "\u0417\u0430\u0433\u0440\u0443\u0436\u0430\u0435\u043c \u043c\u0430\u0448\u0438\u043d\u0443\u2026"},
     "stage.net": {"en": "Configuring network\u2026", "ru": "\u041d\u0430\u0441\u0442\u0440\u0430\u0438\u0432\u0430\u0435\u043c \u0441\u0435\u0442\u044c\u2026"},
     "stage.apt": {"en": "Installing base packages\u2026", "ru": "\u0423\u0441\u0442\u0430\u043d\u0430\u0432\u043b\u0438\u0432\u0430\u0435\u043c \u0431\u0430\u0437\u043e\u0432\u044b\u0435 \u043f\u0430\u043a\u0435\u0442\u044b\u2026"},
-    "stage.tmate": {"en": "Opening the web terminal…", "ru": "Открываем веб-терминал…"},
+    "stage.terminal": {"en": "Opening the web terminal…", "ru": "Открываем веб-терминал…"},
     "stage.health": {"en": "Running final health checks\u2026", "ru": "\u0424\u0438\u043d\u0430\u043b\u044c\u043d\u0430\u044f \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0430 \u0441\u0435\u0440\u0432\u0438\u0441\u043e\u0432\u2026"},
     "success.title": {"en": "VPS deployed successfully!", "ru": "VPS \u0443\u0441\u043f\u0435\u0448\u043d\u043e \u0441\u043e\u0437\u0434\u0430\u043d!"},
     "success.desc": {
@@ -141,9 +151,9 @@ STRINGS: dict[str, dict[str, str]] = {
     },
     "success.access_field": {"en": "Access", "ru": "\u0414\u043e\u0441\u0442\u0443\u043f"},
 
-    "ssh.system": {"en": "System", "ru": "\u0421\u0438\u0441\u0442\u0435\u043c\u0430"},
-    "ssh.dm_failed_title": {"en": "I cannot DM you", "ru": "\u041d\u0435 \u043c\u043e\u0433\u0443 \u043d\u0430\u043f\u0438\u0441\u0430\u0442\u044c \u0432\u0430\u043c \u0432 \u041b\u0421"},
-    "ssh.dm_failed_desc": {"en": "Your access link is only ever sent privately, but your DMs are closed.\n\n**Fix it:** Server settings → *Privacy Settings* → enable **Direct Messages**, then press **Web terminal** again.", "ru": "Ссылка доступа отправляется только лично, но ваши ЛС закрыты.\n\n**Как исправить:** Настройки сервера → *Конфиденциальность* → включите **Личные сообщения**, затем нажмите **Веб-терминал** снова."},
+    "access.system": {"en": "System", "ru": "\u0421\u0438\u0441\u0442\u0435\u043c\u0430"},
+    "dm.failed_title": {"en": "I cannot DM you", "ru": "\u041d\u0435 \u043c\u043e\u0433\u0443 \u043d\u0430\u043f\u0438\u0441\u0430\u0442\u044c \u0432\u0430\u043c \u0432 \u041b\u0421"},
+    "dm.failed_desc": {"en": "Your access link is only ever sent privately, but your DMs are closed.\n\n**Fix it:** Server settings → *Privacy Settings* → enable **Direct Messages**, then press **Web terminal** again.", "ru": "С��ылка доступа отправляется только лично, но ваши ЛС ��а��рыты.\n\n**Как исправить:** Настройки сервера → *Конфиденциальность* → включите **Личные сообщения**, затем нажмите **Веб-терминал** снова."},
 
     "manage.title": {"en": "VPS Control Panel", "ru": "\u041f\u0430\u043d\u0435\u043b\u044c \u0443\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u044f VPS"},
     "manage.desc": {
@@ -576,7 +586,7 @@ STRINGS: dict[str, dict[str, str]] = {
     "sshx.slow": {"en": "The terminal is taking longer than usual. Press **Web terminal** in a moment.", "ru": "Терминал создаётся дольше обычного. Нажмите **Веб-терминал** через минуту."},
     "sshx.retry": {"en": "Could not open the terminal yet \u2014 press **Web terminal** to retry.\nDetails were sent to you privately.", "ru": "Пока не удалось открыть терминал — нажмите **Веб-терминал** ещё раз.\nПодробности отправлены лично."},
     "btn.sshx": {"en": "Web terminal", "ru": "\u0412\u0435\u0431-\u0442\u0435\u0440\u043c\u0438\u043d\u0430\u043b"},
-    "help.sshx": {"en": "Open your VPS in a browser terminal (sshx.io) — no SSH client, no keys, no open ports.", "ru": "Открыть VPS в браузерном терминале (sshx.io) — без SSH-клиента, ключей и открытых портов."},
+    "help.sshx": {"en": "Open your VPS in a browser terminal (sshx.io) — no SSH client, no keys, no open ports.", "ru": "Открыть VPS в браузерном ����р��инале (sshx.io) — без SSH-клиента, ключей и открытых портов."},
     "manage.web_hint": {"en": "No SSH client? `{prefix}sshx` opens the same VPS in your browser.", "ru": "\u041d\u0435\u0442 SSH-\u043a\u043b\u0438\u0435\u043d\u0442\u0430? `{prefix}sshx` \u043e\u0442\u043a\u0440\u043e\u0435\u0442 \u0442\u043e\u0442 \u0436\u0435 VPS \u0432 \u0431\u0440\u0430\u0443\u0437\u0435\u0440\u0435."},
     "about.title": {
         "en": "Free VPS hosting, right from Discord",
@@ -680,3 +690,292 @@ def lang_label(lang: str | None) -> str:
     lang = normalize(lang)
     meta = LANGUAGES[lang]
     return f"{meta['flag']} {meta['name']}"
+
+
+# ---------------------------------------------------------------------------
+# 1.3 Beta additions
+#   * 30-day VPS term (`!deploy` grants the server for 30 days)
+#   * `!specs` - VPS username, RAM, disk
+#   * `!renew` - staff extends a term
+# Merged with setdefault so existing translations are never overwritten.
+# ---------------------------------------------------------------------------
+_V13_STRINGS: dict[str, dict[str, str]] = {
+    # --- 30-day term -------------------------------------------------------
+    "term.field": {"en": "Term", "ru": "\u0421\u0440\u043e\u043a"},
+    "term.offer": {
+        "en": "**{days} days** free of charge \u2014 the countdown starts the moment the server is created.",
+        "ru": "**{days} \u0434\u043d\u0435\u0439** \u0431\u0435\u0441\u043f\u043b\u0430\u0442\u043d\u043e \u2014 \u043e\u0442\u0441\u0447\u0451\u0442 \u043d\u0430\u0447\u0438\u043d\u0430\u0435\u0442\u0441\u044f \u0441\u0440\u0430\u0437\u0443 \u043f\u043e\u0441\u043b\u0435 \u0441\u043e\u0437\u0434\u0430\u043d\u0438\u044f \u0441\u0435\u0440\u0432\u0435\u0440\u0430.",
+    },
+    "term.value": {"en": "**{days} days**", "ru": "**{days} \u0434\u043d.**"},
+    "term.left": {
+        "en": "**{days} d {hours} h** left \u2022 ends <t:{ts}:R>",
+        "ru": "\u043e\u0441\u0442\u0430\u043b\u043e\u0441\u044c **{days} \u0434. {hours} \u0447.** \u2022 \u0434\u043e <t:{ts}:R>",
+    },
+    "term.unlimited": {
+        "en": "**Unlimited** \u2014 no expiry on this host",
+        "ru": "**\u0411\u0435\u0437 \u043e\u0433\u0440\u0430\u043d\u0438\u0447\u0435\u043d\u0438\u044f** \u2014 \u0441\u0440\u043e\u043a \u043d\u0435 \u0437\u0430\u0434\u0430\u043d",
+    },
+    "term.expired": {
+        "en": "**Expired** \u2014 the slot is about to be released",
+        "ru": "**\u0418\u0441\u0442\u0451\u043a** \u2014 \u0441\u043b\u043e\u0442 \u0441\u043a\u043e\u0440\u043e \u043e\u0441\u0432\u043e\u0431\u043e\u0434\u0438\u0442\u0441\u044f",
+    },
+    "term.no_leaves": {
+        "en": "No leaves needed \u2014 uptime is free for the whole term.",
+        "ru": "\u041b\u0438\u0441\u0442\u0438\u043a\u0438 \u043d\u0435 \u043d\u0443\u0436\u043d\u044b \u2014 \u0432\u0435\u0441\u044c \u0441\u0440\u043e\u043a \u0440\u0430\u0431\u043e\u0442\u044b \u0431\u0435\u0441\u043f\u043b\u0430\u0442\u0435\u043d.",
+    },
+    # --- expiry reminders --------------------------------------------------
+    "expiry.warn_title": {
+        "en": "Your VPS term is running out",
+        "ru": "\u0421\u0440\u043e\u043a VPS \u0437\u0430\u043a\u0430\u043d\u0447\u0438\u0432\u0430\u0435\u0442\u0441\u044f",
+    },
+    "expiry.warn_desc": {
+        "en": "`{name}` expires in **{days} day(s)** (<t:{ts}:R>).\n\nBack up whatever you need. Staff can extend the term with `{prefix}renew`.",
+        "ru": "`{name}` \u0437\u0430\u043a\u043e\u043d\u0447\u0438\u0442\u0441\u044f \u0447\u0435\u0440\u0435\u0437 **{days} \u0434\u043d.** (<t:{ts}:R>).\n\n\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u0435 \u0432\u0430\u0436\u043d\u044b\u0435 \u0434\u0430\u043d\u043d\u044b\u0435. \u0410\u0434\u043c\u0438\u043d\u044b \u043c\u043e\u0433\u0443\u0442 \u043f\u0440\u043e\u0434\u043b\u0438\u0442\u044c \u0441\u0440\u043e\u043a \u043a\u043e\u043c\u0430\u043d\u0434\u043e\u0439 `{prefix}renew`.",
+    },
+    "expiry.expired_title": {
+        "en": "VPS term ended",
+        "ru": "\u0421\u0440\u043e\u043a VPS \u0438\u0441\u0442\u0451\u043a",
+    },
+    "expiry.deleted_desc": {
+        "en": "Your server `{name}` reached the end of its **{days}-day** term and was removed.\n\nUse `{prefix}deploy` to get a new one \u2014 it is still free.",
+        "ru": "\u0421\u0435\u0440\u0432\u0435\u0440 `{name}` \u043e\u0442\u0440\u0430\u0431\u043e\u0442\u0430\u043b \u0441\u0432\u043e\u0438 **{days} \u0434\u043d.** \u0438 \u0431\u044b\u043b \u0443\u0434\u0430\u043b\u0451\u043d.\n\n\u041d\u0430\u0431\u0435\u0440\u0438\u0442\u0435 `{prefix}deploy`, \u0447\u0442\u043e\u0431\u044b \u0432\u0437\u044f\u0442\u044c \u043d\u043e\u0432\u044b\u0439 \u2014 \u043e\u043d \u0442\u043e\u0436\u0435 \u0431\u0435\u0441\u043f\u043b\u0430\u0442\u043d\u044b\u0439.",
+    },
+    "expiry.stopped_desc": {
+        "en": "Your server `{name}` reached the end of its **{days}-day** term and was powered off.\n\nAsk staff for `{prefix}renew` to bring it back.",
+        "ru": "\u0421\u0435\u0440\u0432\u0435\u0440 `{name}` \u043e\u0442\u0440\u0430\u0431\u043e\u0442\u0430\u043b \u0441\u0432\u043e\u0438 **{days} \u0434\u043d.** \u0438 \u0431\u044b\u043b \u0432\u044b\u043a\u043b\u044e\u0447\u0435\u043d.\n\n\u041f\u043e\u043f\u0440\u043e\u0441\u0438\u0442\u0435 \u0430\u0434\u043c\u0438\u043d\u043e\u0432 \u043f\u0440\u043e\u0434\u043b\u0438\u0442\u044c \u0441\u0440\u043e\u043a: `{prefix}renew`.",
+    },
+    # --- !specs ------------------------------------------------------------
+    "specs.title": {
+        "en": "VPS specifications",
+        "ru": "\u0425\u0430\u0440\u0430\u043a\u0442\u0435\u0440\u0438\u0441\u0442\u0438\u043a\u0438 VPS",
+    },
+    "specs.desc": {
+        "en": "`{name}` \u2022 {status}",
+        "ru": "`{name}` \u2022 {status}",
+    },
+    "specs.owner": {"en": "Owner", "ru": "\u0412\u043b\u0430\u0434\u0435\u043b\u0435\u0446"},
+    "specs.user": {
+        "en": "VPS username",
+        "ru": "\u042e\u0437\u0435\u0440\u043d\u0435\u0439\u043c VPS",
+    },
+    "specs.user_value": {
+        "en": "`{user}` \u2022 full root access",
+        "ru": "`{user}` \u2022 \u043f\u043e\u043b\u043d\u044b\u0439 root-\u0434\u043e\u0441\u0442\u0443\u043f",
+    },
+    "specs.host": {"en": "Hostname", "ru": "\u0418\u043c\u044f \u0445\u043e\u0441\u0442\u0430"},
+    "specs.ram": {"en": "RAM", "ru": "\u041e\u0417\u0423"},
+    "specs.ram_value": {
+        "en": "**{used} / {limit} MB** used",
+        "ru": "**{used} / {limit} \u041c\u0411** \u0437\u0430\u043d\u044f\u0442\u043e",
+    },
+    "specs.ram_idle": {
+        "en": "**{limit} MB** allocated \u2022 `server offline`",
+        "ru": "**{limit} \u041c\u0411** \u0432\u044b\u0434\u0435\u043b\u0435\u043d\u043e \u2022 `\u0441\u0435\u0440\u0432\u0435\u0440 \u0432\u044b\u043a\u043b\u044e\u0447\u0435\u043d`",
+    },
+    "specs.swap": {"en": "Swap", "ru": "\u041f\u043e\u0434\u043a\u0430\u0447\u043a\u0430"},
+    "specs.disk": {"en": "Disk", "ru": "\u0414\u0438\u0441\u043a"},
+    "specs.disk_value": {
+        "en": "**{disk} GB** SSD",
+        "ru": "**{disk} \u0413\u0411** SSD",
+    },
+    "specs.cpu": {"en": "Processor", "ru": "\u041f\u0440\u043e\u0446\u0435\u0441\u0441\u043e\u0440"},
+    "specs.cpu_value": {
+        "en": "**{cpu} vCPU** \u2022 {load}% now",
+        "ru": "**{cpu} vCPU** \u2022 \u0437\u0430\u0433\u0440\u0443\u0437\u043a\u0430 {load}%",
+    },
+    "specs.uptime": {"en": "Uptime", "ru": "\u0412\u0440\u0435\u043c\u044f \u0440\u0430\u0431\u043e\u0442\u044b"},
+    "specs.traffic": {"en": "Traffic", "ru": "\u0422\u0440\u0430\u0444\u0438\u043a"},
+    "specs.no_vps": {
+        "en": "You do not have a VPS yet. Use `{prefix}deploy` to create one.",
+        "ru": "\u0423 \u0432\u0430\u0441 \u043f\u043e\u043a\u0430 \u043d\u0435\u0442 VPS. \u041d\u0430\u0431\u0435\u0440\u0438\u0442\u0435 `{prefix}deploy`, \u0447\u0442\u043e\u0431\u044b \u0441\u043e\u0437\u0434\u0430\u0442\u044c.",
+    },
+    "specs.hint": {"en": "Access", "ru": "\u0414\u043e\u0441\u0442\u0443\u043f"},
+    "specs.hint_value": {
+        "en": "`{prefix}sshx` \u2014 browser terminal\n`{prefix}manage` \u2014 start / stop / restart",
+        "ru": "`{prefix}sshx` \u2014 \u0432\u0435\u0431-\u0442\u0435\u0440\u043c\u0438\u043d\u0430\u043b\n`{prefix}manage` \u2014 \u0441\u0442\u0430\u0440\u0442 / \u0441\u0442\u043e\u043f / \u0440\u0435\u0441\u0442\u0430\u0440\u0442",
+    },
+    # --- !renew ------------------------------------------------------------
+    "renew.title": {
+        "en": "Term extended",
+        "ru": "\u0421\u0440\u043e\u043a \u043f\u0440\u043e\u0434\u043b\u0451\u043d",
+    },
+    "renew.done": {
+        "en": "<@{user}> got **+{days} days**. The VPS now expires <t:{ts}:R> (<t:{ts}:f>).",
+        "ru": "<@{user}> \u043f\u043e\u043b\u0443\u0447\u0438\u043b **+{days} \u0434\u043d\u0435\u0439**. \u0421\u0440\u043e\u043a VPS \u0442\u0435\u043f\u0435\u0440\u044c \u0434\u043e <t:{ts}:R> (<t:{ts}:f>).",
+    },
+    "renew.unlimited": {
+        "en": "<@{user}> now has an **unlimited** term (no expiry).",
+        "ru": "\u0423 <@{user}> \u0442\u0435\u043f\u0435\u0440\u044c **\u0431\u0435\u0441\u0441\u0440\u043e\u0447\u043d\u044b\u0439** VPS.",
+    },
+    "renew.usage": {
+        "en": "Usage: `{prefix}renew <@user|id> [days]` (default {days} days, `0` = unlimited)",
+        "ru": "\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d\u0438\u0435: `{prefix}renew <@\u044e\u0437\u0435\u0440|id> [\u0434\u043d\u0438]` (\u043f\u043e \u0443\u043c\u043e\u043b\u0447\u0430\u043d\u0438\u044e {days} \u0434\u043d., `0` \u2014 \u0431\u0435\u0437 \u0441\u0440\u043e\u043a\u0430)",
+    },
+    "renew.notice_title": {
+        "en": "Your VPS term was extended",
+        "ru": "\u0421\u0440\u043e\u043a \u0432\u0430\u0448\u0435\u0433\u043e VPS \u043f\u0440\u043e\u0434\u043b\u0451\u043d",
+    },
+    "renew.notice": {
+        "en": "Staff added **{days} days** to your server. It now runs until <t:{ts}:f> (<t:{ts}:R>).",
+        "ru": "\u0410\u0434\u043c\u0438\u043d\u044b \u0434\u043e\u0431\u0430\u0432\u0438\u043b\u0438 **{days} \u0434\u043d\u0435\u0439**. \u0421\u0435\u0440\u0432\u0435\u0440 \u0440\u0430\u0431\u043e\u0442\u0430\u0435\u0442 \u0434\u043e <t:{ts}:f> (<t:{ts}:R>).",
+    },
+    # --- help --------------------------------------------------------------
+    "help.specs": {
+        "en": "Full specs of your VPS: username, RAM, disk, vCPU, uptime and term.",
+        "ru": "\u0412\u0441\u0435 \u0445\u0430\u0440\u0430\u043a\u0442\u0435\u0440\u0438\u0441\u0442\u0438\u043a\u0438 VPS: \u044e\u0437\u0435\u0440\u043d\u0435\u0439\u043c, \u041e\u0417\u0423, \u0434\u0438\u0441\u043a, vCPU, \u0432\u0440\u0435\u043c\u044f \u0440\u0430\u0431\u043e\u0442\u044b \u0438 \u0441\u0440\u043e\u043a.",
+    },
+    "help.renew": {
+        "en": "Extend somebody's VPS term.",
+        "ru": "\u041f\u0440\u043e\u0434\u043b\u0438\u0442\u044c \u0441\u0440\u043e\u043a \u0447\u0443\u0436\u043e\u0433\u043e VPS.",
+    },
+    # --- admin panel -------------------------------------------------------
+    "admin.term": {
+        "en": "VPS term",
+        "ru": "\u0421\u0440\u043e\u043a VPS",
+    },
+    "admin.term_value": {
+        "en": "**{days} days** per server \u2022 expiry action: `{action}`",
+        "ru": "**{days} \u0434\u043d\u0435\u0439** \u043d\u0430 \u0441\u0435\u0440\u0432\u0435\u0440 \u2022 \u043f\u043e \u0438\u0441\u0442\u0435\u0447\u0435\u043d\u0438\u0438: `{action}`",
+    },
+    "admin.term_unlimited": {
+        "en": "**Unlimited** \u2014 servers never expire",
+        "ru": "**\u0411\u0435\u0437 \u0441\u0440\u043e\u043a\u0430** \u2014 \u0441\u0435\u0440\u0432\u0435\u0440\u044b \u043d\u0435 \u0438\u0441\u0442\u0435\u043a\u0430\u044e\u0442",
+    },
+    "admin.leaves_off": {
+        "en": "**Limit removed** \u2014 leaves are cosmetic, uptime is free (`LEAVES_ENABLED=0`)",
+        "ru": "**\u041e\u0433\u0440\u0430\u043d\u0438\u0447\u0435\u043d\u0438\u0435 \u0441\u043d\u044f\u0442\u043e** \u2014 \u043b\u0438\u0441\u0442\u0438\u043a\u0438 \u0442\u043e\u043b\u044c\u043a\u043e \u0434\u043b\u044f \u043a\u0440\u0430\u0441\u043e\u0442\u044b, \u0430\u043f\u0442\u0430\u0439\u043c \u0431\u0435\u0441\u043f\u043b\u0430\u0442\u0435\u043d (`LEAVES_ENABLED=0`)",
+    },
+    "profile.leaves_off": {
+        "en": "Leaves no longer limit anything \u2014 your VPS runs for its whole {days}-day term.",
+        "ru": "\u041b\u0438\u0441\u0442\u0438\u043a\u0438 \u0431\u043e\u043b\u044c\u0448\u0435 \u043d\u0438\u0447\u0435\u0433\u043e \u043d\u0435 \u043e\u0433\u0440\u0430\u043d\u0438\u0447\u0438\u0432\u0430\u044e\u0442 \u2014 VPS \u0440\u0430\u0431\u043e\u0442\u0430\u0435\u0442 \u0432\u0441\u0435 {days} \u0434\u043d\u0435\u0439 \u0441\u0440\u043e\u043a\u0430.",
+    },
+    "profile.unlimited": {
+        "en": "**Unlimited** \u2014 no hourly cost",
+        "ru": "**\u0411\u0435\u0437 \u043e\u0433\u0440\u0430\u043d\u0438\u0447\u0435\u043d\u0438\u0439** \u2014 \u0431\u0435\u0437 \u043f\u043e\u0447\u0430\u0441\u043e\u0432\u043e\u0439 \u043f\u043b\u0430\u0442\u044b",
+    },
+}
+
+for _key, _entry in _V13_STRINGS.items():
+    STRINGS.setdefault(_key, _entry)
+
+
+# ---------------------------------------------------------------------------
+# 1.3 Beta additions: !givevps (staff hands out a ready server)
+# ---------------------------------------------------------------------------
+_V13B_STRINGS: dict[str, dict[str, str]] = {
+    "stage.user": {
+        "en": "Creating the login...",
+        "ru": "Создаю юзернейм...",
+    },
+    "givevps.usage": {
+        "en": (
+            "**Usage:** `{prefix}givevps <@user|id> [username] [RAM] [disk] [days]`\n"
+            "**Example:** `{prefix}givevps @user 5g 25 1` — the login is taken "
+            "from the account\n"
+            "Any order, names optional: `ram=5g disk=25 days=1 cpu=2 swap=1g`\n"
+            "RAM `2048` / `4gb` • disk `40` / `40gb` • days `60`, `2m`, `0` = unlimited\n"
+            "Defaults: {ram} MB • {disk} GB • {days} days • Ubuntu 22.04 LTS"
+        ),
+        "ru": (
+            "**Как писать:** `{prefix}выдать <@юзер|id> [юзернейм] [ОЗУ] [диск] [дней]`\n"
+            "**Пример:** `{prefix}выдать @user 5g 25 1` — юзернейм возьму из аккаунта\n"
+            "Порядок любой, можно с именами: `ram=5g disk=25 days=1 cpu=2 swap=1g`\n"
+            "ОЗУ `2048` / `4gb` • диск `40` / `40gb` • дни `60`, `2m`, `0` = без срока\n"
+            "По умолчанию: {ram} МБ • {disk} ГБ • {days} дней • Ubuntu 22.04 LTS"
+        ),
+    },
+    "givevps.bad_login": {
+        "en": (
+            "Bad username. Latin letters, digits, `_` and `-` only (up to 32) "
+            "and it cannot start with a digit — or just leave it out and I will "
+            "take it from the Discord account."
+        ),
+        "ru": (
+            "Плохой юзернейм. Только латиница, цифры, `_` и `-` (до 32 символов) "
+            "и не с цифры — либо вообще не пиши его, возьму из аккаунта Discord."
+        ),
+    },
+    "givevps.bad_ram": {
+        "en": "Bad RAM value. Write `2048` or `4gb` — from 128 MB to {max} MB.",
+        "ru": "Плохое значение ОЗУ. Пиши `2048` или `4gb` — от 128 МБ до {max} МБ.",
+    },
+    "givevps.bad_disk": {
+        "en": "Bad disk value. Write `20` or `40gb` — from 1 GB to {max} GB.",
+        "ru": "Плохое значение диска. Пиши `20` или `40gb` — от 1 ГБ до {max} ГБ.",
+    },
+    "givevps.bad_days": {
+        "en": "Bad number of days. Use `0`–{max} (`0` = unlimited).",
+        "ru": "Плохое число дней. От `0` до {max} (`0` = без срока).",
+    },
+    "givevps.bad_cpu": {
+        "en": "Bad vCPU value. Write `2` or `1.5` — from 0.1 to {max}.",
+        "ru": "Плохое значение vCPU. Пиши `2` или `1.5` — от 0.1 до {max}.",
+    },
+    "givevps.bad_swap": {
+        "en": "Bad swap value. Write `1024` or `1g` — from 0 MB to {max} MB.",
+        "ru": "Плохое значение swap. Пиши `1024` или `1g` — от 0 МБ до {max} МБ.",
+    },
+    "givevps.title": {"en": "VPS handed out", "ru": "VPS выдан"},
+    "givevps.desc": {
+        "en": "<@{user}> now owns **`{name}`** on Ubuntu 22.04 LTS.",
+        "ru": "<@{user}> теперь владелец **`{name}`** на Ubuntu 22.04 LTS.",
+    },
+    "givevps.login": {"en": "Username", "ru": "Юзернейм"},
+    "givevps.login_value": {
+        "en": "`{user}` • passwordless `sudo` inside the server",
+        "ru": "`{user}` • `sudo` без пароля внутри сервера",
+    },
+    "givevps.specs": {"en": "Resources", "ru": "Ресурсы"},
+    "givevps.specs_value": {
+        "en": "RAM **{ram} MB** (+{swap} MB swap)\nDisk **{disk} GB** • vCPU **{cpu}**",
+        "ru": "ОЗУ **{ram} МБ** (+{swap} МБ swap)\nДиск **{disk} ГБ** • vCPU **{cpu}**",
+    },
+    "givevps.next": {"en": "What happens now", "ru": "Что дальше"},
+    "givevps.next_value": {
+        "en": (
+            "The owner got a DM with the control panel.\n"
+            "`{prefix}manage` • `{prefix}specs` • `{prefix}ssh`"
+        ),
+        "ru": (
+            "Владельцу ушло личное сообщение с панелью управления.\n"
+            "`{prefix}manage` • `{prefix}specs` • `{prefix}ssh`"
+        ),
+    },
+    "givevps.no_dm": {
+        "en": "The owner's DMs are closed — the server is ready anyway.",
+        "ru": "У владельца закрыты личные сообщения — сервер всё равно готов.",
+    },
+    "givevps.notice_title": {"en": "You got a VPS", "ru": "Тебе выдали VPS"},
+    "givevps.notice": {
+        "en": (
+            "Staff handed you **`{name}`** — Ubuntu 22.04 LTS.\n"
+            "Use the buttons below, or `{prefix}manage` • `{prefix}specs` • `{prefix}ssh`."
+        ),
+        "ru": (
+            "Стафф выдал тебе **`{name}`** — Ubuntu 22.04 LTS.\n"
+            "Жми кнопки ниже или пиши `{prefix}manage` • `{prefix}specs` • `{prefix}ssh`."
+        ),
+    },
+    "givevps.failed": {
+        "en": "Could not hand out the VPS: `{error}`",
+        "ru": "Не удалось выдать VPS: `{error}`",
+    },
+    "help.givevps_hint": {
+        "en": "5 GB RAM, 25 GB disk, 1 day — login from the account",
+        "ru": "5 ГБ ОЗУ, 25 ГБ диск, 1 день — юзернейм из аккаунта",
+    },
+    "help.givevps": {
+        "en": (
+            "**Staff.** Hand out a ready VPS: owner, then optional username, "
+            "RAM, disk and days in any order."
+        ),
+        "ru": (
+            "**Стафф.** Выдать готовый VPS: кому, дальше по желанию юзернейм, "
+            "ОЗУ, диск и дни в любом порядке."
+        ),
+    },
+}
+
+for _key, _entry in _V13B_STRINGS.items():
+    STRINGS.setdefault(_key, _entry)
+

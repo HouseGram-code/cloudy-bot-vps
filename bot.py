@@ -1,6 +1,6 @@
 """Cloudy VPS Bot - free VPS hosting from Discord.
 
-Version 1.2 Beta (bilingual RU / EN, leaf economy)
+Version 1.3 Beta (bilingual RU / EN, 30-day free VPS, browser terminal access)
 """
 
 from __future__ import annotations
@@ -8,19 +8,26 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 
 import discord
 from discord.ext import commands, tasks
 
 import embeds
 from config import (
+    ANIM_DELAY,
     BOT_NAME,
     BOT_VERSION,
     COLOR_PRIMARY,
+    COLOR_WARNING,
     COMMAND_PREFIX,
     DISCORD_TOKEN,
     EMOJI,
+    LEAVES_ENABLED,
     OWNER_IDS,
+    VPS_EXPIRY_ACTION,
+    VPS_EXPIRY_WARN_DAYS,
+    VPS_LIFETIME_DAYS,
     is_owner,
 )
 from i18n import LANGUAGES, LangStore, lang_label, normalize
@@ -39,7 +46,7 @@ from views import (
     deliver_sshx,
 )
 from vps_manager import VPSError, VPSManager
-from wallet import MAX_GRANT, WALLET
+from wallet import WALLET
 
 logging.basicConfig(
     level=logging.INFO,
@@ -79,9 +86,9 @@ class UnderMaintenance(commands.CheckFailure):
 # Commands that keep working while maintenance mode is ON.
 MAINTENANCE_ALLOWED = {
     "about",
+    "specs",
     "profile",
-    "bonus",
-    "give",
+    "givevps",
     "rules",
     "lang",
     "help",
@@ -108,19 +115,45 @@ async def on_ready() -> None:
             log.error("Docker backend unavailable: %s", exc)
     if not presence_loop.is_running():
         presence_loop.start()
-    if not billing_loop.is_running():
-        billing_loop.start()
+    # Leaves do not limit anything any more, so the billing loop only runs
+    # when the old economy is explicitly turned back on (LEAVES_ENABLED=1).
+    if WALLET.limits_active():
+        if not billing_loop.is_running():
+            billing_loop.start()
+    else:
+        log.info("leaf limits are disabled - uptime is free, billing loop off")
+    if VPS_LIFETIME_DAYS > 0 and not expiry_loop.is_running():
+        expiry_loop.start()
+        log.info(
+            "VPS term: %s days per server (expiry action: %s)",
+            VPS_LIFETIME_DAYS,
+            VPS_EXPIRY_ACTION,
+        )
 
 
-async def _stats() -> dict:
+# Counting containers is a Docker round-trip, and the presence loop, !about,
+# !slots and the admin panel all want the same numbers - so cache them for a
+# few seconds instead of hammering the daemon.
+_STATS_TTL = 5.0
+_stats_cache: tuple[float, dict] = (0.0, {})
+
+
+async def _stats(force: bool = False) -> dict:
     """Live counters, or an empty dict when Docker is unavailable."""
+    global _stats_cache
     if manager is None:
         return {}
+    cached_at, cached = _stats_cache
+    now = time.monotonic()
+    if not force and cached and now - cached_at < _STATS_TTL:
+        return cached
     try:
-        return await manager.stats()
+        stats = await manager.stats()
     except Exception as exc:  # pragma: no cover
         log.warning("could not read VPS stats: %s", exc)
         return {}
+    _stats_cache = (now, stats)
+    return stats
 
 
 # Rotating English status lines. Each entry is (ActivityType, template) and may
@@ -240,7 +273,8 @@ async def billing_loop() -> None:
     Nothing is ever deleted here - the container is only stopped, so the user
     can top up (daily bonus) and start it again from `!manage`.
     """
-    if manager is None:
+    if manager is None or not WALLET.limits_active():
+        # LEAVES_ENABLED=0 -> uptime is free, there is nothing to charge.
         return
     try:
         records = manager.all_records()
@@ -308,6 +342,103 @@ async def _before_billing_loop() -> None:
     await bot.wait_until_ready()
 
 
+async def _dm_user(user_id: int, embed: discord.Embed) -> bool:
+    """Best-effort DM used by the background loops and by !renew."""
+    try:
+        user = bot.get_user(user_id) or await bot.fetch_user(user_id)
+        if user is None:
+            return False
+        await user.send(embed=embed)
+        return True
+    except (discord.HTTPException, AttributeError):
+        log.info("could not DM %s", user_id)
+        return False
+
+
+# ---------------------------------------------------------------------------
+# 30-day term: remind the owner, then release the slot when the term is over
+# ---------------------------------------------------------------------------
+@tasks.loop(minutes=30)
+async def expiry_loop() -> None:
+    """Warn owners before the term ends and clean up expired servers."""
+    if manager is None or VPS_LIFETIME_DAYS <= 0:
+        return
+    try:
+        rows = manager.terms()
+    except Exception as exc:  # pragma: no cover
+        log.warning("expiry: cannot read state: %s", exc)
+        return
+
+    marks = sorted({int(d) for d in VPS_EXPIRY_WARN_DAYS if int(d) > 0}, reverse=True)
+    for row in rows:
+        owner_id = int(row.get("owner_id") or 0)
+        if not owner_id or not row.get("expires_ts"):
+            continue
+        if is_owner(owner_id):
+            continue  # staff servers never expire
+
+        lang = lang_of(owner_id)
+        name = row.get("name") or "vps"
+
+        if row.get("expired"):
+            action = str(VPS_EXPIRY_ACTION or "delete").strip().lower()
+            try:
+                if action == "stop":
+                    await manager.stop_if_running(owner_id)
+                else:
+                    await manager.delete_vps(owner_id)
+            except Exception as exc:  # pragma: no cover
+                log.warning("expiry: cannot release VPS of %s: %s", owner_id, exc)
+                continue
+            await WALLET.stop_billing(owner_id)
+            log.info("expiry: %s VPS of %s (term is over)", action, owner_id)
+            await _dm_user(
+                owner_id,
+                embeds.info_embed(
+                    f"{EMOJI['clock']} {t(lang, 'expiry.expired_title')}",
+                    t(
+                        lang,
+                        "expiry.stopped_desc"
+                        if action == "stop"
+                        else "expiry.deleted_desc",
+                        name=name,
+                        days=VPS_LIFETIME_DAYS,
+                        prefix=COMMAND_PREFIX,
+                    ),
+                    COLOR_WARNING,
+                ),
+            )
+            await update_presence()
+            continue
+
+        days_left = int(row.get("days_left") or 0)
+        warned = {int(d) for d in (row.get("warned_days") or [])}
+        for mark in marks:
+            if days_left <= mark and mark not in warned:
+                await manager.mark_warned(owner_id, mark)
+                await _dm_user(
+                    owner_id,
+                    embeds.info_embed(
+                        f"{EMOJI['clock']} {t(lang, 'expiry.warn_title')}",
+                        t(
+                            lang,
+                            "expiry.warn_desc",
+                            name=name,
+                            days=max(1, days_left),
+                            ts=int(row["expires_ts"]),
+                            prefix=COMMAND_PREFIX,
+                        ),
+                        COLOR_WARNING,
+                    ),
+                )
+                break
+
+
+@expiry_loop.before_loop
+async def _before_expiry_loop() -> None:
+    await bot.wait_until_ready()
+
+
 # ---------------------------------------------------------------------------
 # User commands
 # ---------------------------------------------------------------------------
@@ -336,9 +467,16 @@ async def deploy(ctx: commands.Context) -> None:
         )
         return
 
-    # A free VPS still needs leaves to stay online.
+    # 1.3 Beta: leaves no longer gate anything - the server is granted for
+    # VPS_LIFETIME_DAYS days free of charge. The wallet row is still created so
+    # the profile card keeps working and so the old economy can be switched
+    # back on with LEAVES_ENABLED=1 without any migration.
     await WALLET.ensure(ctx.author.id, str(ctx.author))
-    if not is_owner(ctx.author.id) and not WALLET.can_run(ctx.author.id):
+    if (
+        WALLET.limits_active()
+        and not is_owner(ctx.author.id)
+        and not WALLET.can_run(ctx.author.id)
+    ):
         await ctx.reply(
             embed=embeds.low_leaves_embed(WALLET.balance(ctx.author.id), lang),
             mention_author=False,
@@ -413,6 +551,58 @@ async def sshx_cmd(ctx: commands.Context) -> None:
         )
     else:
         await ctx.reply(embed=embeds.dm_failed_embed(lang), mention_author=False)
+
+
+# ---------------------------------------------------------------------------
+# !specs - username / RAM / disk of the VPS
+# ---------------------------------------------------------------------------
+@bot.command(
+    name="specs",
+    aliases=[
+        "vps",
+        "\u0441\u043f\u0435\u043a\u0438",
+        "\u0438\u043d\u0444\u043e",
+        "\u0445\u0430\u0440\u0430\u043a\u0442\u0435\u0440\u0438\u0441\u0442\u0438\u043a\u0438",
+    ],
+)
+@commands.cooldown(1, 5, commands.BucketType.user)
+async def specs_cmd(ctx: commands.Context, target: str = "") -> None:
+    """!specs [@user] - VPS username, RAM, disk, vCPU, uptime and term left."""
+    lang = lang_of(ctx.author)
+    target_id = ctx.author.id
+    target_user: discord.abc.User | None = ctx.author
+
+    if target and is_owner(ctx.author.id):
+        try:
+            target_id, _name = await _resolve_user_id(ctx, target)
+        except ModerationError as exc:
+            await ctx.reply(
+                embed=embeds.error_embed(str(exc), lang=lang), mention_author=False
+            )
+            return
+        target_user = bot.get_user(target_id)
+
+    try:
+        mgr = _require_manager()
+        if not await mgr.has_vps(target_id):
+            await ctx.reply(
+                embed=embeds.error_embed(
+                    t(lang, "specs.no_vps", prefix=COMMAND_PREFIX), lang=lang
+                ),
+                mention_author=False,
+            )
+            return
+        async with ctx.typing():
+            info = await mgr.get_info(target_id)
+    except VPSError as exc:
+        await ctx.reply(
+            embed=embeds.error_embed(str(exc), lang=lang), mention_author=False
+        )
+        return
+
+    await ctx.reply(
+        embed=embeds.specs_embed(info, target_user, lang), mention_author=False
+    )
 
 
 @bot.command(name="rules")
@@ -863,7 +1053,7 @@ async def wipe_cmd(ctx: commands.Context, target: str = "", *, reason: str = "")
 
 
 # ---------------------------------------------------------------------------
-# Profile, daily bonus and leaves
+# Profile (leaves are cosmetic since 1.3 Beta)
 # ---------------------------------------------------------------------------
 @bot.command(
     name="profile",
@@ -878,7 +1068,7 @@ async def wipe_cmd(ctx: commands.Context, target: str = "", *, reason: str = "")
 )
 @commands.cooldown(1, 5, commands.BucketType.user)
 async def profile_cmd(ctx: commands.Context, target: str = "") -> None:
-    """!profile - name, ID, leaf balance and the daily bonus button."""
+    """!profile - name, ID, VPS and the (cosmetic) leaf balance."""
     lang = lang_of(ctx.author)
     user: discord.abc.User = ctx.author
 
@@ -901,79 +1091,444 @@ async def profile_cmd(ctx: commands.Context, target: str = "") -> None:
     view.message = msg
 
 
-@bot.command(name="bonus", aliases=["daily", "\u0431\u043e\u043d\u0443\u0441"])
-@commands.cooldown(1, 5, commands.BucketType.user)
-async def bonus_cmd(ctx: commands.Context) -> None:
-    """!bonus - claim the daily leaves."""
-    lang = lang_of(ctx.author)
-    result = await WALLET.claim_bonus(ctx.author.id, str(ctx.author))
-    await ctx.reply(
-        embed=embeds.bonus_claimed_embed(result, lang), mention_author=False
-    )
-
-
+# ---------------------------------------------------------------------------
+# VPS term (staff)
+# ---------------------------------------------------------------------------
 @bot.command(
-    name="give",
-    aliases=[
-        "grant",
-        "leaves",
-        "\u0432\u044b\u0434\u0430\u0442\u044c",
-        "\u0432\u044b\u0434\u0430\u0442\u044c\u043b\u0438\u0441\u0442\u0438\u043a",
-    ],
+    name="renew",
+    aliases=["extend", "\u043f\u0440\u043e\u0434\u043b\u0438\u0442\u044c"],
 )
 @owner_only()
-async def give_cmd(
-    ctx: commands.Context, target: str = "", amount: str = ""
+async def renew_cmd(
+    ctx: commands.Context, target: str = "", days: str = ""
 ) -> None:
-    """!give <@user|id> <amount> - hand out leaves (negative takes them away)."""
+    """!renew <@user|id> [days] - extend a VPS term (`0` makes it unlimited)."""
     lang = lang_of(ctx.author)
-    if not target or not amount:
-        await ctx.reply(
-            embed=embeds.error_embed(
-                t(lang, "grant.usage", prefix=COMMAND_PREFIX), lang=lang
-            ),
-            mention_author=False,
-        )
+    usage = embeds.error_embed(
+        t(lang, "renew.usage", prefix=COMMAND_PREFIX, days=VPS_LIFETIME_DAYS),
+        lang=lang,
+    )
+    if not target:
+        await ctx.reply(embed=usage, mention_author=False)
         return
 
     try:
-        user_id, name = await _resolve_user_id(ctx, target)
+        user_id, _name = await _resolve_user_id(ctx, target)
     except ModerationError as exc:
         await ctx.reply(
             embed=embeds.error_embed(str(exc), lang=lang), mention_author=False
         )
         return
 
+    amount: float | None = None
+    if days:
+        parsed = _plan_number(days)
+        if parsed is None or parsed < 0:
+            await ctx.reply(embed=usage, mention_author=False)
+            return
+        amount = parsed
+
     try:
-        value = int(str(amount).strip().replace("+", ""))
-    except (TypeError, ValueError):
-        value = 0
-    if value == 0 or abs(value) > MAX_GRANT:
+        mgr = _require_manager()
+        expires = await mgr.renew(user_id, amount)
+    except VPSError as exc:
+        await ctx.reply(
+            embed=embeds.error_embed(str(exc), lang=lang), mention_author=False
+        )
+        return
+
+    granted = int(VPS_LIFETIME_DAYS if amount is None else amount)
+    body = (
+        t(lang, "renew.done", user=user_id, days=granted, ts=int(expires))
+        if expires > 0
+        else t(lang, "renew.unlimited", user=user_id)
+    )
+    await ctx.reply(
+        embed=embeds.info_embed(
+            f"{EMOJI['gift']} {t(lang, 'renew.title')}", body, COLOR_PRIMARY
+        ),
+        mention_author=False,
+    )
+
+    if expires > 0:
+        user_lang = lang_of(user_id)
+        await _dm_user(
+            user_id,
+            embeds.info_embed(
+                f"{EMOJI['gift']} {t(user_lang, 'renew.notice_title')}",
+                t(user_lang, "renew.notice", days=granted, ts=int(expires)),
+                COLOR_PRIMARY,
+            ),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Hand out a ready VPS (staff)
+# ---------------------------------------------------------------------------
+GRANT_MIN_RAM_MB = 128
+GRANT_MAX_RAM_MB = 262_144
+GRANT_MAX_DISK_GB = 4_096
+GRANT_MAX_DAYS = 3_650
+GRANT_MAX_CPU = 64
+
+_AMOUNT_RE = re.compile(r"^(\d+(?:[.,]\d+)?)\s*([a-z\u0430-\u044f\u0451]*)$")
+
+
+def _parse_amount(raw: str) -> tuple[float, str] | None:
+    """Split `4gb` / `40 \u0413\u0411` / `60` into (value, unit)."""
+    match = _AMOUNT_RE.match(str(raw or "").strip().lower())
+    if match is None:
+        return None
+    return float(match.group(1).replace(",", ".")), match.group(2)
+
+
+def _parse_ram_mb(raw: str, default: int) -> int | None:
+    if not str(raw or "").strip():
+        return default
+    parsed = _parse_amount(raw)
+    if parsed is None:
+        return None
+    value, unit = parsed
+    if unit.startswith(("t", "\u0442")):
+        value *= 1024 * 1024
+    elif unit.startswith(("g", "\u0433")):
+        value *= 1024
+    elif not unit and value <= 64:
+        # "!givevps @user alex 4 40 30" - 4 obviously means 4 GB, not 4 MB.
+        value *= 1024
+    return int(round(value))
+
+
+def _parse_disk_gb(raw: str, default: int) -> int | None:
+    if not str(raw or "").strip():
+        return default
+    parsed = _parse_amount(raw)
+    if parsed is None:
+        return None
+    value, unit = parsed
+    if unit.startswith(("m", "\u043c")):
+        value /= 1024
+    elif unit.startswith(("t", "\u0442")):
+        value *= 1024
+    return int(round(value))
+
+
+def _parse_days(raw: str, default: int) -> int | None:
+    if not str(raw or "").strip():
+        return default
+    parsed = _parse_amount(raw)
+    if parsed is None:
+        return None
+    value, unit = parsed
+    if unit.startswith(("y", "\u0433")):  # years / \u0433\u043e\u0434
+        value *= 365
+    elif unit.startswith(("m", "\u043c")):  # months / \u043c\u0435\u0441\u044f\u0446
+        value *= 30
+    elif unit.startswith(("w", "\u043d")):  # weeks / \u043d\u0435\u0434\u0435\u043b\u044f
+        value *= 7
+    return int(round(value))
+
+
+# Optional argument names for !givevps, so staff can be explicit when the
+# order is not obvious: `!givevps @user ram=5g disk=25 days=1 cpu=2`.
+_GRANT_KEYS: dict[str, str] = {
+    "user": "login",
+    "login": "login",
+    "username": "login",
+    "name": "login",
+    "\u044e\u0437\u0435\u0440": "login",
+    "\u044e\u0437\u0435\u0440\u043d\u0435\u0439\u043c": "login",
+    "\u043b\u043e\u0433\u0438\u043d": "login",
+    "\u0438\u043c\u044f": "login",
+    "ram": "ram",
+    "mem": "ram",
+    "memory": "ram",
+    "\u043e\u0437\u0443": "ram",
+    "\u0440\u0430\u043c": "ram",
+    "\u043f\u0430\u043c\u044f\u0442\u044c": "ram",
+    "disk": "disk",
+    "hdd": "disk",
+    "ssd": "disk",
+    "storage": "disk",
+    "\u0434\u0438\u0441\u043a": "disk",
+    "days": "days",
+    "day": "days",
+    "term": "days",
+    "\u0434\u043d\u0435\u0439": "days",
+    "\u0434\u043d\u0438": "days",
+    "\u0434\u0435\u043d\u044c": "days",
+    "\u0441\u0440\u043e\u043a": "days",
+    "cpu": "cpu",
+    "vcpu": "cpu",
+    "cores": "cpu",
+    "\u044f\u0434\u0440\u0430": "cpu",
+    "swap": "swap",
+    "\u0441\u0432\u043e\u043f": "swap",
+}
+
+
+def _parse_grant_args(args: tuple[str, ...]) -> dict[str, str]:
+    """Order-free parsing for !givevps - only the target is required.
+
+    A token that looks like a number (with or without a unit) is a resource
+    value, anything else is the login. That is why `!givevps @user 5g 25 1`
+    now means "5 GB RAM, 25 GB disk, 1 day" instead of trying to create an
+    account called `5g`. Named values work too, in any order:
+    `!givevps @user disk=25 ram=5g days=1`.
+    """
+    parsed: dict[str, str] = {}
+    numbers: list[str] = []
+    for raw in args:
+        token = str(raw or "").strip().strip(",")
+        if not token:
+            continue
+
+        field = ""
+        value = token
+        for sep in ("=", ":"):
+            if sep in token:
+                head, _, tail = token.partition(sep)
+                field = _GRANT_KEYS.get(head.strip().lower(), "")
+                if field and tail.strip():
+                    value = tail.strip()
+                else:
+                    field = ""
+                break
+        if field:
+            parsed[field] = value
+            continue
+
+        if _parse_amount(token) is not None:
+            numbers.append(token)
+        elif "login" not in parsed:
+            parsed["login"] = token
+
+    # Bare numbers keep the documented order: RAM, disk, days - skipping
+    # whatever was already given by name.
+    free = [field for field in ("ram", "disk", "days") if field not in parsed]
+    for field, value in zip(free, numbers):
+        parsed[field] = value
+    return parsed
+
+
+def _grant_stages(login: str, ram_mb: int, disk_gb: int) -> list[tuple[str, int, str]]:
+    """Deployment animation with the granted numbers in the log."""
+    return [
+        ("stage.alloc", 8, f"\u001b[0;36m[cloudy]\u001b[0m reserving {ram_mb} MB RAM"),
+        ("stage.image", 22, "\u001b[0;36m[image]\u001b[0m ubuntu:22.04 \u2192 ok"),
+        ("stage.disk", 36, f"\u001b[0;36m[disk]\u001b[0m formatting {disk_gb} GB volume"),
+        ("stage.boot", 52, "\u001b[0;36m[boot]\u001b[0m kernel handoff \u2192 init"),
+        ("stage.net", 66, "\u001b[0;36m[net]\u001b[0m bridge attached, DNS ready"),
+        ("stage.apt", 78, "\u001b[0;36m[apt]\u001b[0m curl git htop python3 tmux"),
+        ("stage.user", 89, f"\u001b[0;36m[user]\u001b[0m useradd {login} \u2192 sudo"),
+        ("stage.health", 97, "\u001b[0;32m[ok]\u001b[0m all services healthy"),
+    ]
+
+
+@bot.command(
+    name="givevps",
+    aliases=[
+        "grantvps",
+        "vpsgive",
+        "\u0432\u044b\u0434\u0430\u0442\u044c",
+        "\u0432\u044b\u0434\u0430\u0442\u044cvps",
+        "\u0432\u044b\u0434\u0430\u0442\u044c\u0432\u043f\u0441",
+    ],
+)
+@owner_only()
+async def givevps_cmd(ctx: commands.Context, target: str = "", *args: str) -> None:
+    """!givevps <@user|id> [username] [RAM] [disk] [days] - hand out a VPS.
+
+    Only the target is required. `!givevps @user 5g 25 1` grants 5 GB RAM,
+    25 GB disk and one day, and the login is taken from the Discord account.
+    """
+    lang = lang_of(ctx.author)
+    plan = PLAN_STORE.plan()
+    usage = embeds.error_embed(
+        t(
+            lang,
+            "givevps.usage",
+            prefix=COMMAND_PREFIX,
+            ram=int(plan["ram_mb"]),
+            disk=int(plan["disk_gb"]),
+            days=int(VPS_LIFETIME_DAYS),
+        ),
+        lang=lang,
+    )
+    if not target:
+        await ctx.reply(embed=usage, mention_author=False)
+        return
+
+    try:
+        mgr = _require_manager()
+        user_id, name = await _resolve_user_id(ctx, target)
+    except (ModerationError, VPSError) as exc:
+        await ctx.reply(
+            embed=embeds.error_embed(str(exc), lang=lang), mention_author=False
+        )
+        return
+
+    # Everything after the target is optional and order-free, so a missing
+    # username no longer turns the RAM value into a login.
+    opts = _parse_grant_args(args)
+
+    login = ""
+    if opts.get("login"):
+        login = VPSManager.normalize_login(opts["login"], fallback="")
+        if not login:
+            await ctx.reply(
+                embed=embeds.error_embed(t(lang, "givevps.bad_login"), lang=lang),
+                mention_author=False,
+            )
+            return
+
+    ram_mb = _parse_ram_mb(opts.get("ram", ""), int(plan["ram_mb"]))
+    if ram_mb is None or not GRANT_MIN_RAM_MB <= ram_mb <= GRANT_MAX_RAM_MB:
         await ctx.reply(
             embed=embeds.error_embed(
-                t(lang, "grant.bad_amount", max=MAX_GRANT), lang=lang
+                t(lang, "givevps.bad_ram", max=GRANT_MAX_RAM_MB), lang=lang
             ),
             mention_author=False,
         )
         return
 
-    balance = await WALLET.add(user_id, value, name)
-    await ctx.reply(
-        embed=embeds.leaves_granted_embed(user_id, value, balance, lang),
+    disk_gb = _parse_disk_gb(opts.get("disk", ""), int(plan["disk_gb"]))
+    if disk_gb is None or not 1 <= disk_gb <= GRANT_MAX_DISK_GB:
+        await ctx.reply(
+            embed=embeds.error_embed(
+                t(lang, "givevps.bad_disk", max=GRANT_MAX_DISK_GB), lang=lang
+            ),
+            mention_author=False,
+        )
+        return
+
+    term = _parse_days(opts.get("days", ""), int(VPS_LIFETIME_DAYS))
+    if term is None or not 0 <= term <= GRANT_MAX_DAYS:
+        await ctx.reply(
+            embed=embeds.error_embed(
+                t(lang, "givevps.bad_days", max=GRANT_MAX_DAYS), lang=lang
+            ),
+            mention_author=False,
+        )
+        return
+
+    cpu_cores: float | None = None
+    if opts.get("cpu"):
+        parsed_cpu = _parse_amount(opts["cpu"])
+        if parsed_cpu is None or not 0.1 <= parsed_cpu[0] <= GRANT_MAX_CPU:
+            await ctx.reply(
+                embed=embeds.error_embed(
+                    t(lang, "givevps.bad_cpu", max=GRANT_MAX_CPU), lang=lang
+                ),
+                mention_author=False,
+            )
+            return
+        cpu_cores = round(parsed_cpu[0], 2)
+
+    swap_mb: int | None = None
+    if opts.get("swap"):
+        swap_mb = _parse_ram_mb(opts["swap"], 0)
+        if swap_mb is None or not 0 <= swap_mb <= GRANT_MAX_RAM_MB:
+            await ctx.reply(
+                embed=embeds.error_embed(
+                    t(lang, "givevps.bad_swap", max=GRANT_MAX_RAM_MB), lang=lang
+                ),
+                mention_author=False,
+            )
+            return
+
+    target_user: discord.abc.User | None = bot.get_user(user_id)
+    if target_user is None:
+        try:
+            target_user = await bot.fetch_user(user_id)
+        except discord.HTTPException:
+            target_user = None
+    owner_name = str(target_user) if target_user is not None else name
+    target_lang = lang_of(user_id)
+
+    if not login:
+        # No username given: build a valid Linux login out of the Discord
+        # account instead of bothering the staff about it.
+        login = VPSManager.suggest_login(
+            getattr(target_user, "name", ""), name, f"cloudy{user_id % 10000}"
+        )
+
+    # Same look as !deploy: a live progress card while the container boots.
+    message = await ctx.reply(
+        embed=embeds.deploy_progress_embed(t(lang, "progress.init"), 3, [], lang),
         mention_author=False,
     )
+    task = asyncio.create_task(
+        mgr.create_custom(
+            user_id,
+            owner_name,
+            login=login,
+            ram_mb=ram_mb,
+            disk_gb=disk_gb,
+            cpu_cores=cpu_cores,
+            swap_mb=swap_mb,
+            days=term,
+            lang=target_lang,
+        )
+    )
 
-    if value > 0:
-        try:
-            user = bot.get_user(user_id) or await bot.fetch_user(user_id)
-            if user is not None:
-                await user.send(
-                    embed=embeds.leaves_notice_embed(
-                        value, balance, lang_of(user_id)
-                    )
+    log_lines: list[str] = []
+    record: dict = {}
+    try:
+        for stage_key, percent, line in _grant_stages(login, ram_mb, disk_gb):
+            log_lines.append(line)
+            await message.edit(
+                embed=embeds.deploy_progress_embed(
+                    t(lang, stage_key), percent, log_lines, lang
                 )
-        except (discord.HTTPException, AttributeError):
-            log.info("could not DM %s about the new leaves", user_id)
+            )
+            await asyncio.sleep(ANIM_DELAY)
+        record = await task
+    except VPSError as exc:
+        await message.edit(embed=embeds.error_embed(str(exc), lang=lang))
+        return
+    except Exception as exc:  # pragma: no cover
+        log.exception("givevps failed")
+        await message.edit(
+            embed=embeds.error_embed(
+                t(lang, "givevps.failed", error=str(exc)[:400]), lang=lang
+            )
+        )
+        return
+
+    info = await mgr.get_info(user_id)
+    granted_login = str(record.get("login") or info.get("login") or "root")
+    await message.edit(
+        embed=embeds.deploy_progress_embed(
+            t(lang, "progress.finishing"), 100, log_lines, lang
+        )
+    )
+    await asyncio.sleep(0.6)
+    await message.edit(
+        embed=embeds.grant_vps_embed(info, user_id, granted_login, lang)
+    )
+    await update_presence()
+
+    # The new owner gets their own control panel, in DMs.
+    if target_user is None:
+        return
+    try:
+        view = ManageView(mgr, user_id, bans, lang=target_lang)
+        await view.refresh_buttons(info)
+        dm = await target_user.send(
+            embed=embeds.grant_vps_notice_embed(info, granted_login, target_lang),
+            view=view,
+        )
+        view.message = dm
+    except (discord.Forbidden, discord.HTTPException, AttributeError):
+        log.info("could not DM %s about the granted VPS", user_id)
+        await ctx.send(
+            embed=embeds.info_embed(
+                f"{EMOJI['mail']} {t(lang, 'givevps.title')}",
+                t(lang, "givevps.no_dm"),
+                COLOR_WARNING,
+            )
+        )
 
 
 # ---------------------------------------------------------------------------

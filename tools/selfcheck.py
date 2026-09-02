@@ -61,7 +61,6 @@ REQUIRED_SETTINGS = [
     "BONUS_COOLDOWN_HOURS",
     "TOTAL_VPS_SLOTS",
     "MAX_VPS_PER_USER",
-    "TMATE_PORTS",
 ]
 
 failures: list[str] = []

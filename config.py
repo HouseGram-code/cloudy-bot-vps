@@ -1,6 +1,7 @@
 """Configuration for Cloudy VPS Bot."""
 
 import os
+import tempfile
 
 from dotenv import load_dotenv
 
@@ -9,10 +10,75 @@ from token_store import get_builtin_token
 load_dotenv()
 
 # ---------------------------------------------------------------------------
+# Writable data directory  (fix for: [Errno 13] Permission denied: '/app')
+# ---------------------------------------------------------------------------
+# Every state file used to be hardcoded to `/app/data/...` - a path that only
+# exists *inside* the Docker image. When the bot runs straight on a host
+# (`python3 bot.py`) or as a non-root user, `os.makedirs("/app/data")` raises
+# `[Errno 13] Permission denied: '/app'`, which is exactly why every deploy
+# failed. The data directory is now resolved once at import time and the first
+# candidate we can really write to wins:
+#   1. $DATA_DIR             explicit override
+#   2. /app/data             inside the container
+#   3. <bot folder>/data     normal host install
+#   4. ~/.cloudy-vps-bot     read-only install folder
+#   5. /tmp/cloudy-vps-bot   last resort, so start-up can never crash
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _is_writable(path: str) -> bool:
+    """True when files can be created inside `path` (creating it if needed)."""
+    try:
+        os.makedirs(path, exist_ok=True)
+        probe = os.path.join(path, ".cloudy-write-test")
+        with open(probe, "w", encoding="utf-8") as fh:
+            fh.write("ok")
+        os.remove(probe)
+        return True
+    except OSError:
+        return False
+
+
+def _resolve_data_dir() -> str:
+    candidates: list[str] = []
+    explicit = (os.getenv("DATA_DIR") or "").strip()
+    if explicit:
+        candidates.append(os.path.abspath(os.path.expanduser(explicit)))
+    candidates += [
+        "/app/data",
+        os.path.join(_HERE, "data"),
+        os.path.join(os.path.expanduser("~"), ".cloudy-vps-bot"),
+        os.path.join(tempfile.gettempdir(), "cloudy-vps-bot"),
+    ]
+    for path in candidates:
+        if _is_writable(path):
+            return path
+    return os.path.abspath(".")
+
+
+DATA_DIR = _resolve_data_dir()
+
+
+def data_path(name: str, env_var: str = "") -> str:
+    """Absolute path of one state file inside DATA_DIR.
+
+    An explicit override (e.g. `STATE_FILE=/srv/cloudy/state.json`) is honoured
+    as long as its folder is writable; otherwise we silently fall back to
+    DATA_DIR, so a stale `/app/data/...` value can never break start-up again.
+    """
+    if env_var:
+        override = (os.getenv(env_var) or "").strip()
+        if override:
+            override = os.path.abspath(os.path.expanduser(override))
+            if _is_writable(os.path.dirname(override) or "."):
+                return override
+    return os.path.join(DATA_DIR, name)
+
+# ---------------------------------------------------------------------------
 # Bot identity
 # ---------------------------------------------------------------------------
 BOT_NAME = "Cloudy VPS Bot"
-BOT_VERSION = "1.2 Beta"
+BOT_VERSION = "1.3 Beta"
 BOT_FOOTER = f"{BOT_NAME} • v{BOT_VERSION}"
 
 COMMAND_PREFIX = os.getenv("COMMAND_PREFIX", "!")
@@ -25,7 +91,7 @@ COMMAND_PREFIX = os.getenv("COMMAND_PREFIX", "!")
 DEFAULT_LANG = (os.getenv("DEFAULT_LANG", "en").lower() if os.getenv("DEFAULT_LANG") else "en")
 if DEFAULT_LANG not in ("en", "ru"):
     DEFAULT_LANG = "en"
-LANG_FILE = os.getenv("LANG_FILE", "/app/data/languages.json")
+LANG_FILE = data_path("languages.json", "LANG_FILE")
 
 # The token ships with the project (obfuscated in token_store.py) so the bot
 # runs out of the box. An explicit DISCORD_TOKEN env var always takes priority.
@@ -57,10 +123,10 @@ def is_owner(user_id: int) -> bool:
 # ---------------------------------------------------------------------------
 # Privacy
 # ---------------------------------------------------------------------------
-# SSH credentials are NEVER posted in a channel. They are sent to the user's
+# Access links are NEVER posted in a channel. They are sent to the user's
 # direct messages; if DMs are closed the bot falls back to an ephemeral reply
 # that only that user can see.
-SSH_TO_DM_ONLY = os.getenv("SSH_TO_DM_ONLY", "1") not in ("0", "false", "False")
+ACCESS_TO_DM_ONLY = os.getenv("ACCESS_TO_DM_ONLY", "1") not in ("0", "false", "False")
 
 # ---------------------------------------------------------------------------
 # Rules (max 5) - shown by !rules and before every deployment
@@ -143,7 +209,7 @@ PLAN = {
     "disk_gb": int(os.getenv("VPS_DISK_GB", "20")),
     "bandwidth": os.getenv("VPS_BANDWIDTH", "Unmetered (fair use)"),
     "location": os.getenv("VPS_LOCATION", "EU • Docker Host"),
-    "access": "tmate SSH • sshx web",
+    "access": "sshx web terminal",
 }
 
 # ---------------------------------------------------------------------------
@@ -155,57 +221,61 @@ MAX_VPS_PER_USER = int(os.getenv("MAX_VPS_PER_USER", "1"))
 # Global capacity of the host: how many VPS may exist at the same time (5/5).
 # Staff can change it at runtime from the admin panel or with `!slots`.
 TOTAL_VPS_SLOTS = int(os.getenv("TOTAL_VPS_SLOTS", "5"))
-STATE_FILE = os.getenv("STATE_FILE", "/app/data/vps_state.json")
-BAN_FILE = os.getenv("BAN_FILE", "/app/data/bans.json")
-SLOTS_FILE = os.getenv("SLOTS_FILE", "/app/data/slots.json")
+STATE_FILE = data_path("vps_state.json", "STATE_FILE")
+BAN_FILE = data_path("bans.json", "BAN_FILE")
+SLOTS_FILE = data_path("slots.json", "SLOTS_FILE")
 # Live resource plan (RAM / swap / vCPU / disk) edited from `!admin` or
 # `!plan`. Deleting the file resets the plan to the values above.
-PLAN_FILE = os.getenv("PLAN_FILE", "/app/data/plan.json")
+PLAN_FILE = data_path("plan.json", "PLAN_FILE")
+MAINTENANCE_FILE = data_path("maintenance.json", "MAINTENANCE_FILE")
 
 # ---------------------------------------------------------------------------
-# Leaf economy ("listiki")
+# VPS term: a free server is granted for 30 days
 # ---------------------------------------------------------------------------
-# Leaves keep a free VPS alive: a new user gets START_LEAVES, and every hour of
-# uptime costs LEAF_COST_PER_HOUR. At zero the VPS is stopped, never deleted.
-# The daily bonus gives BONUS_LEAVES once every BONUS_COOLDOWN_HOURS hours.
-START_LEAVES = int(os.getenv("START_LEAVES", "3"))
-LEAF_COST_PER_HOUR = int(os.getenv("LEAF_COST_PER_HOUR", "1"))
+# `!deploy` hands out the VPS for VPS_LIFETIME_DAYS days. The bot reminds the
+# owner before the term ends and then frees the slot automatically.
+VPS_LIFETIME_DAYS = int(os.getenv("VPS_LIFETIME_DAYS", "30") or 30)
+VPS_LIFETIME_SECONDS = max(0, VPS_LIFETIME_DAYS) * 86400
+# "delete" frees the slot when the term is over, "stop" only powers it off.
+VPS_EXPIRY_ACTION = (os.getenv("VPS_EXPIRY_ACTION", "delete") or "delete").strip().lower()
+# Days before the end of the term when the owner receives a DM reminder.
+VPS_EXPIRY_WARN_DAYS = [
+    int(day.strip())
+    for day in os.getenv("VPS_EXPIRY_WARN_DAYS", "7,3,1").split(",")
+    if day.strip().isdigit()
+] or [7, 3, 1]
+
+# ---------------------------------------------------------------------------
+# Leaf economy ("listiki") - THE LIMIT IS REMOVED
+# ---------------------------------------------------------------------------
+# Leaves no longer gate anything: a server is granted for VPS_LIFETIME_DAYS
+# days and is never stopped because the balance hit zero. Leaves stay only as
+# a cosmetic counter for `!profile` / `!bonus` / `!give`.
+# Set LEAVES_ENABLED=1 if you ever want the old hourly billing back.
+LEAVES_ENABLED = (os.getenv("LEAVES_ENABLED", "0") or "0").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+START_LEAVES = int(os.getenv("START_LEAVES", "100"))
+LEAF_COST_PER_HOUR = int(
+    os.getenv("LEAF_COST_PER_HOUR", "1" if LEAVES_ENABLED else "0")
+)
 BONUS_LEAVES = int(os.getenv("BONUS_LEAVES", "25"))
 BONUS_COOLDOWN_HOURS = int(os.getenv("BONUS_COOLDOWN_HOURS", "24"))
-WALLET_FILE = os.getenv("WALLET_FILE", "/app/data/wallet.json")
+WALLET_FILE = data_path("wallet.json", "WALLET_FILE")
 
-# DNS servers given to guest containers so tmate.io always resolves.
+# DNS servers given to guest containers so package mirrors and sshx resolve.
 VPS_DNS = [s.strip() for s in os.getenv("VPS_DNS", "1.1.1.1,8.8.8.8").split(",") if s.strip()]
 
-# How long to wait for a tmate session string before giving up (seconds)
-TMATE_TIMEOUT = int(os.getenv("TMATE_TIMEOUT", "90"))
-
 # ---------------------------------------------------------------------------
-# tmate relay
-# ---------------------------------------------------------------------------
-# Many hosts / firewalls only allow "normal" outbound ports, so tmate's default
-# TCP 2200 is blocked. ssh.tmate.io also accepts connections on 22 (and 443 on
-# most nodes), so we try several ports in order and use the first that works.
-TMATE_SERVER_HOST = os.getenv("TMATE_SERVER_HOST", "ssh.tmate.io")
-TMATE_PORTS = [
-    int(p.strip())
-    for p in os.getenv("TMATE_PORTS", "2200,22,443").split(",")
-    if p.strip().isdigit()
-] or [2200]
-
-# Only needed when TMATE_SERVER_HOST points at a self-hosted tmate-ssh-server.
-# Get them from that server's `tmate-ssh-server -h` output / install log.
-TMATE_RSA_FINGERPRINT = os.getenv("TMATE_RSA_FINGERPRINT", "").strip()
-TMATE_ED25519_FINGERPRINT = os.getenv("TMATE_ED25519_FINGERPRINT", "").strip()
-
-# Deployment animation speed (seconds per frame)
-# ---------------------------------------------------------------------------
-# sshx - browser terminal (second access method)
+# sshx - browser terminal (the only way into a VPS)
 # ---------------------------------------------------------------------------
 # sshx gives every VPS a link like https://sshx.io/s/<id>#<key>. The part after
 # "#" is the encryption key: it stays in the browser and never reaches the
 # server, so the link itself is the credential (we only DM it).
-# Handy when the host blocks outbound SSH: sshx only needs plain HTTPS.
+# It only needs plain outbound HTTPS: no SSH client, no keys, no open ports.
 SSHX_ENABLED = os.getenv("SSHX_ENABLED", "1").strip().lower() not in (
     "0",
     "false",

@@ -12,7 +12,21 @@ import json
 import os
 import time
 
-MAINTENANCE_FILE = os.getenv("MAINTENANCE_FILE", "/app/data/maintenance.json")
+# `/app/data` only exists inside the Docker image: writing there from a host
+# install raised "[Errno 13] Permission denied: '/app'". config resolves a
+# writable data folder for every state file now.
+try:  # keep working even next to a very old config.py
+    from config import MAINTENANCE_FILE as _CONFIG_MAINTENANCE_FILE
+except Exception:  # pragma: no cover
+    _CONFIG_MAINTENANCE_FILE = ""
+
+MAINTENANCE_FILE = (
+    _CONFIG_MAINTENANCE_FILE
+    or os.getenv("MAINTENANCE_FILE")
+    or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "data", "maintenance.json"
+    )
+)
 
 
 class MaintenanceStore:

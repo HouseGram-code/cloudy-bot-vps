@@ -36,11 +36,30 @@ def _setting(name, default):
     return value
 
 
-START_LEAVES = int(_setting("START_LEAVES", 3))
-LEAF_COST_PER_HOUR = int(_setting("LEAF_COST_PER_HOUR", 1))
+# 1.3 Beta: the leaf LIMIT is removed. LEAVES_ENABLED is False by default, so
+# uptime is never charged and no server is stopped for an empty balance -
+# leaves are just a counter shown by `!profile`, `!bonus` and `!give`.
+LEAVES_ENABLED = bool(getattr(config, "LEAVES_ENABLED", False))
+START_LEAVES = int(_setting("START_LEAVES", 100))
+LEAF_COST_PER_HOUR = int(_setting("LEAF_COST_PER_HOUR", 1 if LEAVES_ENABLED else 0))
 BONUS_LEAVES = int(_setting("BONUS_LEAVES", 25))
 BONUS_COOLDOWN_HOURS = float(_setting("BONUS_COOLDOWN_HOURS", 24))
-WALLET_FILE = str(_setting("WALLET_FILE", "/app/data/wallet.json"))
+
+
+def _default_wallet_path() -> str:
+    """Writable wallet path (never the container-only `/app/data`)."""
+    resolver = getattr(config, "data_path", None)
+    if callable(resolver):
+        return resolver("wallet.json", "WALLET_FILE")
+    return os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "data", "wallet.json"
+    )
+
+
+WALLET_FILE = str(getattr(config, "WALLET_FILE", "") or _default_wallet_path())
+
+# Reported as "hours left" while the leaf limit is switched off.
+UNLIMITED_HOURS = 1_000_000
 
 # Hard limits so a typo in the admin panel cannot break the economy.
 MAX_LEAVES = 1_000_000
@@ -131,7 +150,13 @@ class Wallet:
         user["hours_left"] = self.hours_left(user_id)
         user["cost"] = int(LEAF_COST_PER_HOUR)
         user["bonus_amount"] = int(BONUS_LEAVES)
+        # True when leaves cannot limit anything (the 1.3 Beta default).
+        user["unlimited"] = not self.limits_active()
         return user
+
+    def limits_active(self) -> bool:
+        """True only when leaves can really stop a server."""
+        return bool(LEAVES_ENABLED) and int(LEAF_COST_PER_HOUR) > 0
 
     def bonus_in(self, user_id: int) -> float:
         """Seconds until the daily bonus can be claimed again (0 = ready)."""
@@ -150,11 +175,19 @@ class Wallet:
 
     def hours_left(self, user_id: int) -> int:
         """How many more hours a VPS can run with the current balance."""
+        if not self.limits_active():
+            return UNLIMITED_HOURS
         cost = max(1, int(LEAF_COST_PER_HOUR))
         return int(self.balance(user_id) // cost)
 
     def can_run(self, user_id: int) -> bool:
-        """True when the user can pay for at least one hour of uptime."""
+        """True when the user may run a VPS.
+
+        The leaf limit is removed, so this is always True unless somebody
+        turns the old hourly billing back on with LEAVES_ENABLED=1.
+        """
+        if not self.limits_active():
+            return True
         return self.balance(user_id) >= max(1, int(LEAF_COST_PER_HOUR))
 
     def top(self, limit: int = 10) -> list[tuple[int, dict]]:
@@ -240,6 +273,14 @@ class Wallet:
         Returns {"charged": int, "balance": int, "empty": bool} where `empty`
         means the user can no longer pay for the next hour.
         """
+        if not self.limits_active():
+            # Leaf limit removed: uptime is free and nothing is ever charged.
+            return {
+                "charged": 0,
+                "balance": self.balance(user_id),
+                "empty": False,
+            }
+
         cost = max(1, int(LEAF_COST_PER_HOUR))
         async with self._lock:
             user = self._user(user_id, name)

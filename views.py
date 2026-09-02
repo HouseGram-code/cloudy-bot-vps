@@ -1,6 +1,6 @@
 """Interactive buttons (discord.ui) for Cloudy VPS Bot.
 
-Security: SSH credentials are only ever delivered by direct message (with an
+Security: access links are only ever delivered by direct message (with an
 ephemeral fallback when DMs are closed). They are never posted in a channel.
 
 Every view carries a `lang` ("en" / "ru") so labels and messages match the
@@ -21,6 +21,8 @@ from config import (
     COLOR_PRIMARY,
     COMMAND_PREFIX,
     EMOJI,
+    LEAVES_ENABLED,
+    VPS_LIFETIME_DAYS,
     is_owner,
 )
 from i18n import DEFAULT_LANG, LANGUAGES, LangStore, t
@@ -38,9 +40,36 @@ from plan_store import (
 )
 from slots import MAX_SLOTS, MIN_SLOTS, SLOTS, SlotStore
 from vps_manager import VPSError, VPSManager
-from wallet import MAX_GRANT, WALLET, Wallet
+from wallet import WALLET, Wallet
 
 log = logging.getLogger("cloudy.views")
+
+
+async def _deliver_private(
+    user: discord.abc.User,
+    embed: discord.Embed,
+    interaction: discord.Interaction | None = None,
+    lang: str = DEFAULT_LANG,
+) -> bool:
+    """DM one access card, with an ephemeral fallback when DMs are closed."""
+    try:
+        await user.send(embed=embed)
+        return True
+    except (discord.Forbidden, discord.HTTPException) as exc:
+        log.warning("DM to %s failed: %s", user.id, exc)
+
+    if interaction is not None:
+        target = (
+            interaction.followup
+            if interaction.response.is_done()
+            else interaction.response
+        )
+        try:
+            await target.send(embed=embeds.dm_failed_embed(lang), ephemeral=True)
+            await target.send(embed=embed, ephemeral=True)
+        except discord.HTTPException:
+            pass
+    return False
 
 
 async def deliver_sshx(
@@ -51,21 +80,9 @@ async def deliver_sshx(
     lang: str = DEFAULT_LANG,
 ) -> bool:
     """Send the sshx link privately. Returns True if the DM was delivered."""
-    embed = embeds.sshx_dm_embed(info, link, lang)
-    try:
-        await user.send(embed=embed)
-        return True
-    except (discord.Forbidden, discord.HTTPException) as exc:
-        log.warning("DM to %s failed: %s", user.id, exc)
-
-    if interaction is not None:
-        target = interaction.followup if interaction.response.is_done() else interaction.response
-        try:
-            await target.send(embed=embeds.dm_failed_embed(lang), ephemeral=True)
-            await target.send(embed=embed, ephemeral=True)
-        except discord.HTTPException:
-            pass
-    return False
+    return await _deliver_private(
+        user, embeds.sshx_dm_embed(info, link, lang), interaction, lang
+    )
 
 
 class OwnerOnlyView(discord.ui.View):
@@ -147,7 +164,7 @@ DEPLOY_STAGES: list[tuple[str, int, str]] = [
     ("stage.boot", 52, "\u001b[0;36m[boot]\u001b[0m kernel handoff \u2192 init"),
     ("stage.net", 66, "\u001b[0;36m[net]\u001b[0m bridge attached, DNS ready"),
     ("stage.apt", 78, "\u001b[0;36m[apt]\u001b[0m curl git htop python3 tmux"),
-    ("stage.tmate", 90, "\u001b[0;36m[shell]\u001b[0m terminal service ready"),
+    ("stage.terminal", 90, "\u001b[0;36m[shell]\u001b[0m terminal service ready"),
     ("stage.health", 97, "\u001b[0;32m[ok]\u001b[0m all services healthy"),
 ]
 
@@ -284,6 +301,7 @@ class ManageView(OwnerOnlyView):
                 "vps_restart",
                 "vps_sshx",
             ):
+                # The web terminal needs a running guest.
                 child.disabled = not running
             else:
                 child.disabled = False
@@ -384,6 +402,7 @@ class ManageView(OwnerOnlyView):
                 ),
                 ephemeral=True,
             )
+
 
     @discord.ui.button(
         label="Refresh",
@@ -523,23 +542,16 @@ class ProfileView(discord.ui.View):
 
     async def build_embed(self) -> discord.Embed:
         state = self.wallet.state(self.owner_id, str(self.profile_user))
-        state["bonus_at"] = self.wallet.bonus_at(self.owner_id)
         return embeds.profile_embed(
             self.profile_user, state, await self._vps_info(), self.lang
         )
 
     def sync_buttons(self) -> None:
-        ready = self.wallet.bonus_ready(self.owner_id)
+        # 1.3 Beta: the daily-bonus button is gone together with !bonus.
         for child in self.children:
             if not isinstance(child, discord.ui.Button):
                 continue
-            if child.custom_id == "profile_bonus":
-                child.label = t(self.lang, "btn.bonus" if ready else "btn.bonus_wait")
-                child.disabled = not ready
-                child.style = (
-                    discord.ButtonStyle.success if ready else discord.ButtonStyle.secondary
-                )
-            elif child.custom_id == "profile_refresh":
+            if child.custom_id == "profile_refresh":
                 child.label = t(self.lang, "btn.profile_refresh")
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -566,24 +578,6 @@ class ProfileView(discord.ui.View):
 
     # ---- buttons ----
     @discord.ui.button(
-        label="Daily bonus",
-        style=discord.ButtonStyle.success,
-        emoji="\U0001F381",
-        custom_id="profile_bonus",
-    )
-    async def bonus(self, interaction: discord.Interaction, button: discord.ui.Button):
-        result = await self.wallet.claim_bonus(
-            interaction.user.id, str(interaction.user)
-        )
-        await interaction.response.defer()
-        embed = await self.build_embed()
-        self.sync_buttons()
-        await interaction.edit_original_response(embed=embed, view=self)
-        await interaction.followup.send(
-            embed=embeds.bonus_claimed_embed(result, self.lang), ephemeral=True
-        )
-
-    @discord.ui.button(
         label="Refresh",
         style=discord.ButtonStyle.secondary,
         emoji="\U0001F501",
@@ -599,80 +593,6 @@ class ProfileView(discord.ui.View):
 # ---------------------------------------------------------------------------
 # !admin
 # ---------------------------------------------------------------------------
-class GiveLeavesModal(discord.ui.Modal):
-    """Admin panel dialog: hand out (or take away) leaves."""
-
-    def __init__(self, panel: "AdminView", lang: str = DEFAULT_LANG):
-        super().__init__(title=t(lang, "admin.give_modal")[:45])
-        self.panel = panel
-        self.lang = lang
-        self.user_field = discord.ui.TextInput(
-            label=t(lang, "admin.give_user")[:45],
-            placeholder="1264586393594630239",
-            max_length=64,
-        )
-        self.amount_field = discord.ui.TextInput(
-            label=t(lang, "admin.give_amount")[:45],
-            placeholder="25",
-            max_length=8,
-        )
-        self.add_item(self.user_field)
-        self.add_item(self.amount_field)
-
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        lang = self.lang
-        match = re.search(r"\d{15,25}", str(self.user_field.value or ""))
-        if not match:
-            await interaction.response.send_message(
-                embed=embeds.error_embed(t(lang, "admin.give_bad_user"), lang=lang),
-                ephemeral=True,
-            )
-            return
-        user_id = int(match.group(0))
-
-        raw = str(self.amount_field.value or "").strip().replace("+", "")
-        try:
-            amount = int(raw)
-        except ValueError:
-            amount = 0
-        if amount == 0 or abs(amount) > MAX_GRANT:
-            await interaction.response.send_message(
-                embed=embeds.error_embed(
-                    t(lang, "grant.bad_amount", max=MAX_GRANT), lang=lang
-                ),
-                ephemeral=True,
-            )
-            return
-
-        balance = await self.panel.wallet.add(user_id, amount)
-        await interaction.response.send_message(
-            embed=embeds.leaves_granted_embed(user_id, amount, balance, lang),
-            ephemeral=True,
-        )
-
-        # Tell the lucky user about it (best effort).
-        if amount > 0:
-            try:
-                target = interaction.client.get_user(user_id) or await (
-                    interaction.client.fetch_user(user_id)
-                )
-                if target is not None:
-                    await target.send(
-                        embed=embeds.leaves_notice_embed(amount, balance, lang)
-                    )
-            except discord.HTTPException:
-                pass
-
-        # Refresh the panel behind the modal.
-        if self.panel.message is not None:
-            try:
-                embed = await self.panel.build_embed()
-                self.panel.sync_buttons()
-                await self.panel.message.edit(embed=embed, view=self.panel)
-            except discord.HTTPException:
-                pass
-
-
 class AdminView(discord.ui.View):
     """Owner-only panel: turn maintenance mode on/off and see live counters."""
 
@@ -757,8 +677,6 @@ class AdminView(discord.ui.View):
             elif child.custom_id == "slot_minus":
                 child.label = t(self.lang, "admin.btn_slot_minus")
                 child.disabled = self.slots.total <= MIN_SLOTS
-            elif child.custom_id == "admin_give":
-                child.label = t(self.lang, "admin.btn_give")
             elif child.custom_id == "admin_plan":
                 child.label = t(self.lang, "admin.btn_plan")
             elif child.custom_id == "admin_ram_plus":
@@ -796,6 +714,48 @@ class AdminView(discord.ui.View):
             except discord.HTTPException:
                 pass
 
+    # ---- interaction plumbing -------------------------------------------
+    # Every button used to run its store update BEFORE acknowledging the
+    # interaction; a slow disk or a raised exception left Discord showing
+    # "This interaction failed" and the panel frozen. Now we always defer
+    # first, then work, then re-render - and errors are reported instead of
+    # killing the panel.
+    async def _safe_defer(self, interaction: discord.Interaction) -> None:
+        if not interaction.response.is_done():
+            try:
+                await interaction.response.defer()
+            except discord.HTTPException:
+                pass
+
+    async def _rerender(self, interaction: discord.Interaction) -> None:
+        """Rebuild the panel embed and push fresh button states."""
+        try:
+            embed = await self.build_embed()
+        except Exception as exc:  # pragma: no cover
+            log.warning("admin panel: could not rebuild the embed: %s", exc)
+            return
+        self.sync_buttons()
+        try:
+            await interaction.edit_original_response(embed=embed, view=self)
+            return
+        except discord.HTTPException as exc:
+            log.warning("admin panel: could not edit the response: %s", exc)
+        if self.message is not None:
+            try:
+                await self.message.edit(embed=embed, view=self)
+            except discord.HTTPException:
+                pass
+
+    async def _panel_error(
+        self, interaction: discord.Interaction, exc: Exception
+    ) -> None:
+        try:
+            await interaction.followup.send(
+                embed=embeds.error_embed(f"`{exc}`", lang=self.lang), ephemeral=True
+            )
+        except discord.HTTPException:
+            pass
+
     # ---- buttons ----
     @discord.ui.button(
         label="Maintenance",
@@ -804,13 +764,16 @@ class AdminView(discord.ui.View):
         custom_id="maint_toggle",
     )
     async def toggle(self, interaction: discord.Interaction, button: discord.ui.Button):
-        state = await self.maintenance.toggle(
-            interaction.user.id, str(interaction.user)
-        )
-        await interaction.response.defer()
-        embed = await self.build_embed()
-        self.sync_buttons()
-        await interaction.edit_original_response(embed=embed, view=self)
+        await self._safe_defer(interaction)
+        try:
+            state = await self.maintenance.toggle(
+                interaction.user.id, str(interaction.user)
+            )
+        except Exception as exc:  # pragma: no cover
+            log.exception("admin panel: maintenance toggle failed")
+            await self._panel_error(interaction, exc)
+            return
+        await self._rerender(interaction)
         await interaction.followup.send(
             embed=embeds.maintenance_toggled_embed(state, self.lang), ephemeral=True
         )
@@ -835,21 +798,24 @@ class AdminView(discord.ui.View):
         custom_id="maint_refresh",
     )
     async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        embed = await self.build_embed()
-        self.sync_buttons()
-        await interaction.edit_original_response(embed=embed, view=self)
+        await self._safe_defer(interaction)
+        await self._rerender(interaction)
 
     # ---- capacity buttons ----
     async def _change_slots(self, interaction: discord.Interaction, delta: int) -> None:
+        await self._safe_defer(interaction)
         old = self.slots.total
-        await self.slots.add(delta, interaction.user.id, str(interaction.user))
-        await interaction.response.defer()
-        embed = await self.build_embed()
-        self.sync_buttons()
-        await interaction.edit_original_response(embed=embed, view=self)
+        try:
+            await self.slots.add(delta, interaction.user.id, str(interaction.user))
+        except Exception as exc:  # pragma: no cover
+            log.exception("admin panel: slot change failed")
+            await self._panel_error(interaction, exc)
+            return
+        await self._rerender(interaction)
+        if self.slots.total == old:
+            return  # already at the limit, the buttons now show it
         await interaction.followup.send(
-            embed=embeds.slots_changed_embed(old, self.stats, self.lang),
+            embed=embeds.slots_changed_embed(old, self.stats or {}, self.lang),
             ephemeral=True,
         )
 
@@ -877,19 +843,6 @@ class AdminView(discord.ui.View):
     ):
         await self._change_slots(interaction, +1)
 
-    # ---- leaf economy ----
-    @discord.ui.button(
-        label="Give leaves",
-        style=discord.ButtonStyle.primary,
-        emoji="\U0001F343",
-        custom_id="admin_give",
-        row=2,
-    )
-    async def give_leaves(
-        self, interaction: discord.Interaction, button: discord.ui.Button
-    ):
-        await interaction.response.send_modal(GiveLeavesModal(self, self.lang))
-
     # ---- free VPS resources (RAM / disk) ----
     async def _change_plan(
         self,
@@ -897,19 +850,22 @@ class AdminView(discord.ui.View):
         ram_delta: int = 0,
         disk_delta: int = 0,
     ) -> None:
+        await self._safe_defer(interaction)
         old = self.plan.plan()
-        if ram_delta:
-            new = await self.plan.add_ram(
-                ram_delta, interaction.user.id, str(interaction.user)
-            )
-        else:
-            new = await self.plan.add_disk(
-                disk_delta, interaction.user.id, str(interaction.user)
-            )
-        await interaction.response.defer()
-        embed = await self.build_embed()
-        self.sync_buttons()
-        await interaction.edit_original_response(embed=embed, view=self)
+        try:
+            if ram_delta:
+                new = await self.plan.add_ram(
+                    ram_delta, interaction.user.id, str(interaction.user)
+                )
+            else:
+                new = await self.plan.add_disk(
+                    disk_delta, interaction.user.id, str(interaction.user)
+                )
+        except Exception as exc:  # pragma: no cover
+            log.exception("admin panel: plan change failed")
+            await self._panel_error(interaction, exc)
+            return
+        await self._rerender(interaction)
         await interaction.followup.send(
             embed=embeds.plan_changed_embed(old, new, self.lang), ephemeral=True
         )

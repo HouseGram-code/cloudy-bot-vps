@@ -1,9 +1,18 @@
 services:
   cloudy-bot:
     build: .
-    image: cloudy-vps-bot:1.0-beta
+    image: cloudy-vps-bot:1.3-beta
     container_name: cloudy-vps-bot
     restart: unless-stopped
+
+    # Run as root inside the container: the bot talks to /var/run/docker.sock
+    # and writes to /app/data. Without this some hosts start the container as
+    # a random UID, which caused "[Errno 13] Permission denied: '/app'".
+    user: "0:0"
+
+    environment:
+      # Where the JSON stores live (state, wallet, bans, languages...).
+      DATA_DIR: /app/data
 
     # .env is OPTIONAL: the token is bundled in token_store.py and every plan
     # value has a default in config.py. Requires Compose v2.24+ for

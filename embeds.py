@@ -17,7 +17,10 @@ from config import (
     BOT_VERSION,
     COMMAND_PREFIX,
     LEAF_COST_PER_HOUR,
+    LEAVES_ENABLED,
     START_LEAVES,
+    VPS_EXPIRY_ACTION,
+    VPS_LIFETIME_DAYS,
     COLOR_ERROR,
     COLOR_NEUTRAL,
     COLOR_PRIMARY,
@@ -152,7 +155,10 @@ def profile_embed(
     embed.add_field(
         name=f"{EMOJI['clock']} {t(lang, 'profile.runtime')}",
         value=(
-            t(lang, "profile.runtime_value", hours=hours)
+            # Leaves stopped limiting uptime in 1.3 Beta.
+            t(lang, "profile.unlimited")
+            if not LEAVES_ENABLED
+            else t(lang, "profile.runtime_value", hours=hours)
             if hours > 0
             else t(lang, "profile.runtime_empty")
         ),
@@ -177,21 +183,6 @@ def profile_embed(
             inline=False,
         )
 
-    if wallet.get("bonus_ready", True):
-        bonus_value = t(lang, "profile.bonus_ready", amount=bonus_amount)
-    else:
-        bonus_value = t(
-            lang,
-            "profile.bonus_wait",
-            amount=bonus_amount,
-            ts=int(wallet.get("bonus_at", 0)),
-        )
-    embed.add_field(
-        name=f"{EMOJI['gift']} {t(lang, 'profile.bonus')}",
-        value=bonus_value,
-        inline=False,
-    )
-
     embed.add_field(
         name=f"{EMOJI['spark']} {t(lang, 'profile.stats')}",
         value=t(
@@ -203,19 +194,26 @@ def profile_embed(
         ),
         inline=False,
     )
-    embed.add_field(
-        name=f"{EMOJI['scroll']} {t(lang, 'profile.economy')}",
-        value=t(
-            lang,
-            "profile.economy_value",
-            start=START_LEAVES,
-            cost=cost,
-            amount=bonus_amount,
-            hours=BONUS_COOLDOWN_HOURS,
-            prefix=P,
-        ),
-        inline=False,
-    )
+    if LEAVES_ENABLED:
+        embed.add_field(
+            name=f"{EMOJI['scroll']} {t(lang, 'profile.economy')}",
+            value=t(
+                lang,
+                "profile.economy_value",
+                start=START_LEAVES,
+                cost=cost,
+                amount=bonus_amount,
+                hours=BONUS_COOLDOWN_HOURS,
+                prefix=P,
+            ),
+            inline=False,
+        )
+    else:
+        embed.add_field(
+            name=f"{EMOJI['leaf']} {t(lang, 'profile.economy')}",
+            value=t(lang, "profile.leaves_off", days=VPS_LIFETIME_DAYS),
+            inline=False,
+        )
     return _footer(embed)
 
 
@@ -331,7 +329,7 @@ def about_embed(lang: str = DEFAULT_LANG, stats: dict | None = None) -> discord.
             f"{EMOJI['ram']} **{_plan['ram_mb']} MB** RAM \u2022 "
             f"{EMOJI['cpu']} **{_plan['cpu_cores']:g} vCPU** \u2022 "
             f"{EMOJI['disk']} **{_plan['disk_gb']} GB** SSD\n"
-            f"{EMOJI['os']} `{_plan['os']}` \u2022 {EMOJI['key']} `root / SSH`\n"
+            f"{EMOJI['os']} `{_plan['os']}` \u2022 {EMOJI['key']} `root / web`\n"
             f"{EMOJI['net']} `{_plan['bandwidth']}` \u2022 `{_plan['name']}`"
         ),
         inline=False,
@@ -364,6 +362,33 @@ def capacity_line(stats: dict, lang: str = DEFAULT_LANG) -> str:
         total=int(stats.get("slots", 0)),
         running=int(stats.get("running", 0)),
         stopped=int(stats.get("stopped", 0)),
+    )
+
+
+# ---------------------------------------------------------------------------
+# 30-day term helpers
+# ---------------------------------------------------------------------------
+def term_line(lang: str = DEFAULT_LANG) -> str:
+    """\"30 days free of charge\" line used by !deploy and the admin panel."""
+    if VPS_LIFETIME_DAYS <= 0:
+        return t(lang, "term.unlimited")
+    return t(lang, "term.offer", days=VPS_LIFETIME_DAYS)
+
+
+def term_status(info: dict, lang: str = DEFAULT_LANG) -> str:
+    """How much of the term one server has left."""
+    expires = int(float(info.get("expires_ts") or 0))
+    if not expires:
+        return t(lang, "term.unlimited")
+    seconds = int(max(0.0, float(info.get("seconds_left") or 0)))
+    if seconds <= 0:
+        return t(lang, "term.expired")
+    return t(
+        lang,
+        "term.left",
+        days=seconds // 86400,
+        hours=(seconds % 86400) // 3600,
+        ts=expires,
     )
 
 
@@ -410,6 +435,13 @@ def deploy_offer_embed(
     embed.add_field(
         name=f"{EMOJI['spark']} {t(lang, 'deploy.plan')}",
         value=f"`{plan['name']}` • {t(lang, 'deploy.location')}: `{plan['location']}`",
+        inline=False,
+    )
+    # 1.3 Beta: every free server is granted for 30 days.
+    embed.add_field(
+        name=f"{EMOJI['clock']} {t(lang, 'term.field')}",
+        value=term_line(lang)
+        + ("" if LEAVES_ENABLED else "\n" + t(lang, "term.no_leaves")),
         inline=False,
     )
     if stats:
@@ -492,6 +524,15 @@ def deploy_success_embed(
         inline=True,
     )
     embed.add_field(
+        name=f"{EMOJI['gift']} {t(lang, 'term.field')}",
+        value=(
+            t(lang, "term.value", days=int(info.get("term_days") or VPS_LIFETIME_DAYS))
+            + "\n"
+            + term_status(info, lang)
+        ),
+        inline=False,
+    )
+    embed.add_field(
         name=f"{EMOJI['web']} {t(lang, 'success.access_field')}",
         value=access_status,
         inline=False,
@@ -502,10 +543,11 @@ def deploy_success_embed(
 # ---------------------------------------------------------------------------
 # Access delivery (DM only)
 #
-# NOTE: ssh_dm_embed was removed together with tmate/SSH support. This host is
-# behind provider NAT, so neither outbound TCP 2200 nor an inbound public port
-# is available; the browser terminal below needs only outbound HTTPS.
+# a root credential, so it never touches a channel. The browser terminal
+# (sshx, outbound HTTPS only) stays as a fallback for hosts that block
 # ---------------------------------------------------------------------------
+
+
 def sshx_dm_embed(info: dict, link: str, lang: str = DEFAULT_LANG) -> discord.Embed:
     """Browser-terminal link (sshx). The link IS the key, so DM only."""
     embed = discord.Embed(
@@ -524,7 +566,7 @@ def sshx_dm_embed(info: dict, link: str, lang: str = DEFAULT_LANG) -> discord.Em
         inline=False,
     )
     embed.add_field(
-        name=f"{EMOJI['os']} {t(lang, 'ssh.system')}",
+        name=f"{EMOJI['os']} {t(lang, 'access.system')}",
         value=f"{info.get('os', '-')} \u2022 {info.get('ram_limit_mb', '-')} MB RAM \u2022 "
         f"{info.get('cpu_limit', 0):g} vCPU \u2022 {info.get('disk_gb', '-')} GB",
         inline=False,
@@ -542,11 +584,223 @@ def sshx_dm_embed(info: dict, link: str, lang: str = DEFAULT_LANG) -> discord.Em
     return _footer(embed)
 
 
+def specs_embed(
+    info: dict,
+    user: discord.abc.User | None = None,
+    lang: str = DEFAULT_LANG,
+) -> discord.Embed:
+    """`!specs` - VPS username, RAM, disk and the rest of the hardware."""
+    running = str(info.get("status", "")).lower() == "running"
+    embed = discord.Embed(
+        title=f"{EMOJI['cpu']} {t(lang, 'specs.title')}",
+        description=t(
+            lang,
+            "specs.desc",
+            name=info.get("name", "-"),
+            status=status_badge(info.get("status", "unknown"), lang),
+        ),
+        color=COLOR_SUCCESS if running else COLOR_NEUTRAL,
+    )
+
+    owner_id = int(info.get("owner_id") or 0)
+    owner_mention = user.mention if user is not None else (
+        f"<@{owner_id}>" if owner_id else "-"
+    )
+    owner_name = str(user) if user is not None else (info.get("owner_name") or "")
+    embed.add_field(
+        name=f"{EMOJI['user']} {t(lang, 'specs.owner')}",
+        value=owner_mention + (f"\n`{owner_name}`" if owner_name else ""),
+        inline=True,
+    )
+    embed.add_field(
+        name=f"{EMOJI['key']} {t(lang, 'specs.user')}",
+        value=t(
+            lang,
+            "specs.user_value",
+            user=info.get("login") or info.get("ssh_user") or "root",
+        ),
+        inline=True,
+    )
+    embed.add_field(
+        name=f"{EMOJI['id']} {t(lang, 'generic.server_id')}",
+        value=f"`{info.get('short_id', '-')}`",
+        inline=True,
+    )
+
+    ram_limit = max(1, int(info.get("ram_limit_mb") or 0))
+    ram_used = int(info.get("ram_used_mb") or 0) if running else 0
+    ram_pct = min(100, int(ram_used * 100 / ram_limit))
+    embed.add_field(
+        name=f"{EMOJI['ram']} {t(lang, 'specs.ram')}",
+        value=(
+            f"`{mini_bar(ram_pct)}` "
+            + t(lang, "specs.ram_value", used=ram_used, limit=ram_limit)
+            if running
+            else t(lang, "specs.ram_idle", limit=ram_limit)
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name=f"{EMOJI['disk']} {t(lang, 'specs.disk')}",
+        value=t(lang, "specs.disk_value", disk=info.get("disk_gb", 0)),
+        inline=True,
+    )
+    swap = int(info.get("swap_mb") or 0)
+    embed.add_field(
+        name=f"{EMOJI['ram']} {t(lang, 'specs.swap')}",
+        value=f"**{swap} MB**" if swap else "`-`",
+        inline=True,
+    )
+    embed.add_field(
+        name=f"{EMOJI['cpu']} {t(lang, 'specs.cpu')}",
+        value=t(
+            lang,
+            "specs.cpu_value",
+            cpu=f"{float(info.get('cpu_limit') or 0):g}",
+            load=f"{float(info.get('cpu_percent') or 0.0):.1f}" if running else "0.0",
+        ),
+        inline=True,
+    )
+    embed.add_field(
+        name=f"{EMOJI['os']} {t(lang, 'generic.os')}",
+        value=f"**{info.get('os', '-')}**",
+        inline=True,
+    )
+    embed.add_field(
+        name=f"{EMOJI['net']} {t(lang, 'specs.traffic')}",
+        value=(
+            f"\u2193 **{float(info.get('net_rx_mb') or 0):.1f} MB** \u2022 "
+            f"\u2191 **{float(info.get('net_tx_mb') or 0):.1f} MB**"
+        ),
+        inline=True,
+    )
+    embed.add_field(
+        name=f"{EMOJI['clock']} {t(lang, 'specs.uptime')}",
+        value=(
+            f"**{human_uptime(int(info.get('uptime_seconds') or 0))}**"
+            if running
+            else "`-`"
+        ),
+        inline=True,
+    )
+    embed.add_field(
+        name=f"{EMOJI['gear']} {t(lang, 'specs.host')}",
+        value=f"`{info.get('hostname') or info.get('name', '-')}`",
+        inline=True,
+    )
+    embed.add_field(
+        name=f"{EMOJI['gift']} {t(lang, 'term.field')}",
+        value=term_status(info, lang),
+        inline=True,
+    )
+    embed.add_field(
+        name=f"{EMOJI['web']} {t(lang, 'specs.hint')}",
+        value=t(lang, "specs.hint_value", prefix=P),
+        inline=False,
+    )
+    return _footer(embed)
+
+
+def grant_vps_embed(
+    info: dict,
+    owner_id: int,
+    login: str = "root",
+    lang: str = DEFAULT_LANG,
+) -> discord.Embed:
+    """Staff confirmation card for `!givevps`."""
+    embed = discord.Embed(
+        title=f"{EMOJI['gift']} {t(lang, 'givevps.title')}",
+        description=t(
+            lang, "givevps.desc", user=int(owner_id), name=info.get("name", "-")
+        ),
+        color=COLOR_SUCCESS,
+    )
+    embed.add_field(
+        name=f"{EMOJI['key']} {t(lang, 'givevps.login')}",
+        value=t(lang, "givevps.login_value", user=login or "root"),
+        inline=True,
+    )
+    embed.add_field(
+        name=f"{EMOJI['id']} {t(lang, 'generic.server_id')}",
+        value=f"`{info.get('short_id', '-')}`",
+        inline=True,
+    )
+    embed.add_field(
+        name=f"{EMOJI['os']} {t(lang, 'generic.os')}",
+        value=f"`{info.get('os', 'Ubuntu 22.04 LTS')}`",
+        inline=True,
+    )
+    embed.add_field(
+        name=f"{EMOJI['gear']} {t(lang, 'givevps.specs')}",
+        value=t(
+            lang,
+            "givevps.specs_value",
+            ram=int(info.get("ram_limit_mb") or 0),
+            swap=int(info.get("swap_mb") or 0),
+            disk=int(info.get("disk_gb") or 0),
+            cpu=info.get("cpu_limit", 1),
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name=f"{EMOJI['clock']} {t(lang, 'term.field')}",
+        value=term_status(info, lang),
+        inline=False,
+    )
+    embed.add_field(
+        name=f"{EMOJI['spark']} {t(lang, 'givevps.next')}",
+        value=t(lang, "givevps.next_value", prefix=P),
+        inline=False,
+    )
+    return _footer(embed)
+
+
+def grant_vps_notice_embed(
+    info: dict, login: str = "root", lang: str = DEFAULT_LANG
+) -> discord.Embed:
+    """DM for the user who just received a VPS from staff."""
+    embed = discord.Embed(
+        title=f"{EMOJI['rocket']} {t(lang, 'givevps.notice_title')}",
+        description=t(
+            lang, "givevps.notice", name=info.get("name", "-"), prefix=P
+        ),
+        color=COLOR_SUCCESS,
+    )
+    embed.add_field(
+        name=f"{EMOJI['key']} {t(lang, 'givevps.login')}",
+        value=t(lang, "givevps.login_value", user=login or "root"),
+        inline=True,
+    )
+    embed.add_field(
+        name=f"{EMOJI['os']} {t(lang, 'generic.os')}",
+        value=f"`{info.get('os', 'Ubuntu 22.04 LTS')}`",
+        inline=True,
+    )
+    embed.add_field(
+        name=f"{EMOJI['gear']} {t(lang, 'givevps.specs')}",
+        value=t(
+            lang,
+            "givevps.specs_value",
+            ram=int(info.get("ram_limit_mb") or 0),
+            swap=int(info.get("swap_mb") or 0),
+            disk=int(info.get("disk_gb") or 0),
+            cpu=info.get("cpu_limit", 1),
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name=f"{EMOJI['clock']} {t(lang, 'term.field')}",
+        value=term_status(info, lang),
+        inline=False,
+    )
+    return _footer(embed)
+
+
 def dm_failed_embed(lang: str = DEFAULT_LANG) -> discord.Embed:
     return _footer(
         discord.Embed(
-            title=f"{EMOJI['mail']} {t(lang, 'ssh.dm_failed_title')}",
-            description=t(lang, "ssh.dm_failed_desc"),
+            title=f"{EMOJI['mail']} {t(lang, 'dm.failed_title')}",
+            description=t(lang, "dm.failed_desc"),
             color=COLOR_WARNING,
         )
     )
@@ -874,6 +1128,11 @@ def help_embed(
     embed.add_field(name=f"`{prefix}deploy`", value=t(lang, "help.deploy"), inline=False)
     embed.add_field(name=f"`{prefix}manage`", value=t(lang, "help.manage"), inline=False)
     embed.add_field(
+        name=f"`{prefix}specs` \u2022 `{prefix}\u0441\u043f\u0435\u043a\u0438`",
+        value=t(lang, "help.specs"),
+        inline=False,
+    )
+    embed.add_field(
         name=f"`{prefix}sshx` \u2022 `{prefix}\u0432\u0435\u0431`",
         value=t(lang, "help.sshx"),
         inline=False,
@@ -895,11 +1154,6 @@ def help_embed(
         inline=False,
     )
     embed.add_field(
-        name=f"`{prefix}bonus` \u2022 `{prefix}\u0431\u043e\u043d\u0443\u0441`",
-        value=t(lang, "help.bonus", amount=BONUS_LEAVES, hours=BONUS_COOLDOWN_HOURS),
-        inline=False,
-    )
-    embed.add_field(
         name=f"`{prefix}about` \u2022 `{prefix}\u043e\u0431\u043e\u0442\u0435`",
         value=t(lang, "help.about"),
         inline=False,
@@ -916,7 +1170,9 @@ def help_embed(
                 f"`{prefix}bans` • `{prefix}servers`\n"
                 f"`{prefix}admin` • `{prefix}maintenance on|off`\n"
                 f"`{prefix}slots [+1|-1|set N]` • `{prefix}wipe <@user|id> [reason]`\n"
-                f"`{prefix}give <@user|id> <leaves>` • `{prefix}plan [ram|disk|cpu] <N>`"
+                f"`{prefix}givevps <@user|id> [username] [RAM] [disk] [days]`\n"
+                f"\u21b3 `{prefix}givevps @user 5g 25 1` \u2014 {t(lang, 'help.givevps_hint')}\n"
+                f"`{prefix}plan [ram|disk|cpu] <N>` • `{prefix}renew <@user|id> [days]`"
             ),
             inline=False,
         )
@@ -1126,14 +1382,32 @@ def admin_panel_embed(
         inline=False,
     )
     embed.add_field(
+        name=f"{EMOJI['gift']} {t(lang, 'admin.term')}",
+        value=(
+            t(
+                lang,
+                "admin.term_value",
+                days=VPS_LIFETIME_DAYS,
+                action=VPS_EXPIRY_ACTION,
+            )
+            if VPS_LIFETIME_DAYS > 0
+            else t(lang, "admin.term_unlimited")
+        ),
+        inline=False,
+    )
+    embed.add_field(
         name=f"{EMOJI['leaf']} {t(lang, 'admin.leaves')}",
-        value=t(
-            lang,
-            "admin.leaves_value",
-            start=START_LEAVES,
-            cost=LEAF_COST_PER_HOUR,
-            amount=BONUS_LEAVES,
-            hours=BONUS_COOLDOWN_HOURS,
+        value=(
+            t(
+                lang,
+                "admin.leaves_value",
+                start=START_LEAVES,
+                cost=LEAF_COST_PER_HOUR,
+                amount=BONUS_LEAVES,
+                hours=BONUS_COOLDOWN_HOURS,
+            )
+            if LEAVES_ENABLED
+            else t(lang, "admin.leaves_off")
         ),
         inline=False,
     )

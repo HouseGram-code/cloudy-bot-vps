@@ -1,12 +1,27 @@
-# Cloudy VPS Bot — v1.1 Beta
+# Cloudy VPS Bot — v1.3 Beta
 
 A Discord bot that hands out **free VPS** instances (Docker containers running
-**Ubuntu 22.04 LTS**) with **tmate SSH** access, a pretty deployment animation,
+**Ubuntu 22.04 LTS**) with a **browser terminal**, a pretty deployment animation,
 and a button-based control panel.
 
 > Languages: **Russian + English**. Every user picks their own with `!lang`
 > (stored in `data/languages.json`), and the guest login banner follows the
 > same choice via `CLOUDY_LANG`.
+
+---
+
+## What's new in 1.3 Beta
+
+| Change | Details |
+|---|---|
+| **Crash fixed** | `Deployment failed: [Errno 13] Permission denied: '/app'`. `config.py` now resolves a **writable** data directory (`DATA_DIR` → `./data` → `~/.cloudy-vps` → temp dir) and every store (`state`, `wallet`, `bans`, `languages`, `slots`, `plan`, `maintenance`) saves through it. `vps_manager` also survives a read-only disk instead of failing the deploy. |
+| **No more leaf limits** | Leaves no longer gate `!deploy`, `!manage` or uptime: `LEAVES_ENABLED=0` by default, the billing loop does not even start, and the profile card shows an unlimited badge. Set `LEAVES_ENABLED=1` to bring the old economy back. |
+| **30-day free term** | Every server is granted for **30 days** (`VPS_LIFETIME_DAYS`). `!deploy` shows the term before and after the build, `!manage` / `!specs` show the days left, DM reminders arrive 7 / 3 / 1 days before the end, and expired servers are released automatically (`VPS_EXPIRY_ACTION=delete` or `stop`). |
+| **Real tmate.io SSH is back** | `!ssh` (and the green **SSH** button in `!manage`) starts a genuine `ssh.tmate.io` session and **DMs it privately** — the command never appears in the channel. The browser terminal (`!sshx`) stays as a fallback. |
+| **New `!specs`** | VPS username (`root`), hostname, RAM (used / limit + bar), disk, swap, vCPU, OS, traffic, uptime, server ID and the remaining term. Staff can check anyone: `!specs @user`. |
+| **New `!renew`** | **Staff.** `!renew @user 30` extends a term, `!renew @user 0` makes it unlimited. The owner gets a DM. |
+| **Admin panel fixed** | Buttons acknowledge the click *before* touching the stores (no more "This interaction failed"), every store error is reported instead of freezing the panel, the panel re-renders from a fallback when the response expires, limit-reached clicks no longer post a bogus confirmation, and the panel shows the VPS term. |
+| **Server repair** | `./start.sh fix` (or `bash tools/fix_server.sh`) checks Docker, the socket, data-dir permissions, `.env`, the guest image, dead containers and Python syntax — then recreates the bot container. |
 
 ---
 
@@ -16,6 +31,9 @@ and a button-based control panel.
 |---|---|
 | `!deploy` | Shows the free plan specs (RAM, swap, vCPU, disk, OS, bandwidth, access) with a **Start** button. Pressing Start plays an animated progress bar and then reveals the live server + web-terminal link. |
 | `!manage` | Live control panel: status, RAM usage bar, CPU usage bar, disk, OS, network I/O, uptime, server ID + buttons **Start / Stop / Restart / Web terminal / Refresh**. |
+| `!specs` • `!инфо` | Full server card: **VPS username**, hostname, **RAM**, **disk**, swap, vCPU, OS, traffic, uptime, server ID and the days left of the 30-day term. `!specs @user` for staff. |
+| `!renew <@user\|id> [days]` | **Staff.** Extends the VPS term (`0` = unlimited). |
+| `!givevps <@user\|id> [username] [RAM] [disk] [days]` | **Staff.** Hands out a ready VPS with the same animated deployment: login, RAM, disk and term on Ubuntu 22.04 LTS. Only the target is required — everything else is optional and order-free (`!givevps @user 5g 25 1`, `ram=5g disk=25 days=1 cpu=2 swap=1g`), and a missing username is derived from the Discord account. The new owner gets a DM with the control panel. Aliases: `!выдать`, `!grantvps`. |
 | `!rules` | The 5 rules of the free tier. |
 | `!destroy` | Permanently removes the user's VPS. |
 | `!ban <@user\|id> [reason]` | **Staff.** Blocks the user, stops their server, DMs them the reason. |
@@ -61,7 +79,6 @@ cloudy-vps-bot/
 ├── token_store.py               # bundled bot token (obfuscated, scanner-safe)
 ├── tools/set_token.py           # helper to replace the bundled token
 ├── tools/scan_secrets.py        # pre-push check: files + git history
-├── tools/check_tmate.sh         # diagnose tmate/SSH problems
 ├── tools/clean_git_history.sh   # wipes a leaked token from git history
 ├── .gitignore
 ├── requirements.txt
@@ -70,7 +87,7 @@ cloudy-vps-bot/
 ├── start.sh                     # one-command build + run (creates .env if missing)
 ├── .env / .env.example
 └── images/
-    └── ubuntu-22.04/Dockerfile  # the guest "VPS" image (ubuntu:22.04 + tmate)
+    └── ubuntu-22.04/Dockerfile  # the guest "VPS" image (ubuntu:22.04 + sshx)
 ```
 
 ---
@@ -233,16 +250,20 @@ git push -f origin main
 
 ## How to connect: the web terminal
 
-Access is provided by **sshx**, a browser terminal. There is no SSH button.
+There is exactly **one** door into a server — the sshx browser terminal — and it
+is always **delivered by DM**:
 
 | | sshx web terminal |
 |---|---|
-| Command | `!sshx` or the **Web terminal** button in `!manage` |
+| Command | `!sshx` / `!веб` or the **Web terminal** button in `!manage` |
 | Client | any browser |
-| Needs | outbound HTTPS only |
+| Needs | outbound HTTPS only — no SSH client, no keys, no open ports |
 | Looks like | `https://sshx.io/s/wC8cc6Mbjv#W0apHWrt8OaX4W` |
+| Login | `root` |
 
-It opens the container as `root`, and the link is sent **by DM only**.
+The link is a **credential**: the bot sends it to your DMs only and never prints
+it in a channel. If your DMs are closed the bot says so instead of leaking the
+session. It opens the container as `root`.
 
 * The client is one static binary; the bot installs it inside the VPS on first
   use (official build from `sshx.s3.amazonaws.com`, with `https://sshx.io/get`
@@ -257,30 +278,6 @@ It opens the container as `root`, and the link is sent **by DM only**.
   link can be revoked in one command. Stopping the VPS kills the session too.
 * Settings: `SSHX_ENABLED`, `SSHX_TIMEOUT`, `SSHX_SERVER` (self-hosted mesh),
   `SSHX_INSTALL_URL`, `SSHX_BINARY_BASE`.
-
----
-
-## Why tmate SSH was removed
-
-tmate needs one of two things, and a NATed host has neither:
-
-* **outbound TCP 2200** to `ssh.tmate.io` - the only real tmate relay port.
-  Many providers block it at the network edge, where `ufw` cannot help
-  (outbound is already allowed by default; the filter is upstream).
-* **a publicly reachable inbound port** for a self-hosted relay
-  (`tools/setup_relay.sh`). Behind provider NAT the host only has private
-  addresses (`10.x`, `172.17.x`), so there is nothing to publish. An
-  "echo my IP" service reports the NAT gateway, which belongs to someone else -
-  pointing the bot at it yields `Connection refused`.
-
-Ports 22 and 443 on `ssh.tmate.io` accept TCP but are **not** the relay: they
-never complete the handshake, so "TCP OK" there is misleading.
-
-sshx has neither requirement - it only dials out over HTTPS - so it works on
-exactly the hosts where tmate cannot.
-
-`tools/setup_relay.sh` and `tools/check_tmate.sh` are kept for hosts that do
-have a public address or an open outbound 2200.
 
 ---
 
@@ -324,31 +321,46 @@ the **Rules** button in both panels, and referenced on the deploy card — press
 
 ---
 
-## Troubleshooting: "Could not open a tmate session"
+## Troubleshooting: "[Errno 13] Permission denied: '/app'"
+
+Fixed in 1.3 Beta. If an older build still shows it, or the bot cannot save its
+state, run the repair script:
+
+```bash
+./start.sh fix          # same as: bash tools/fix_server.sh
+bash tools/fix_server.sh --check   # report only, change nothing
+```
+
+What happened: the bot wrote its JSON stores to `/app/data`, and creating that
+directory fails whenever `/app` is not writable for the process (container
+started as a non-root UID, read-only layer, or the code run from a directory
+owned by someone else). Now `config.py` picks the first writable location out of
+`$DATA_DIR` → `./data` → `~/.cloudy-vps` → a temp directory, `vps_manager`
+keeps working even if the state file cannot be written, and the image itself
+creates `/app/data` with open permissions.
+
+---
+
+## Troubleshooting: "Could not open a web terminal"
 
 Run the built-in diagnostic:
 
 ```bash
-bash tools/check_tmate.sh
+python3 tools/selfcheck.py
 ```
 
-It checks, on the host **and** inside the guest container: DNS for
-`ssh.tmate.io`, outbound **TCP 2200**, whether the `tmate` binary exists, the
-tmate log, and finally opens a real test session.
-
-The three usual causes:
+The usual causes:
 
 | Cause | Fix |
 |---|---|
-| `tmate` missing from the guest image (old image built before this fix) | `docker build --no-cache -t cloudy-vps:ubuntu-22.04 ./images/ubuntu-22.04` then `!destroy` + `!deploy` |
-| Outbound **TCP 2200** blocked by the host firewall | `ufw allow out 2200/tcp` (or the equivalent in your provider's firewall) |
+| Outbound **HTTPS** blocked on the host | allow `443/tcp` outbound — sshx needs nothing else |
+| `sshx` missing from an old guest image | `docker build --no-cache -t cloudy-vps:ubuntu-22.04 ./images/ubuntu-22.04`, then `!destroy` + `!deploy` |
 | DNS not resolving inside containers | already handled via `VPS_DNS=1.1.1.1,8.8.8.8` in `.env` |
+| The VPS is stopped | `!manage` → **Start**, then press **Web terminal** again |
 
-What changed in the bot itself: tmate is now started with `nohup ... -F` and
-logged to `/tmp/cloudy.tmate.log`, the SSH string is **polled** instead of
-blocking on `tmate wait`, the binary is auto-installed if missing, existing
-sessions are validated before reuse, and failures return the real DNS/TCP/log
-output instead of *"no output"*.
+How it works in the bot: the client is auto-installed on first use, the link is
+**polled** out of `/tmp/cloudy.sshx.log`, every request kills the previous
+session, and a failure returns the real log output instead of *"no output"*.
 
 ---
 
@@ -407,7 +419,7 @@ The text under the bot's name comes from the Developer Portal:
 2. Paste this into **Description** and press Save:
 
 ```
-Free Ubuntu 22.04 VPS, right from Discord. One command, full root over SSH, no card, no cost. Type !deploy to get your free VPS, or !about to see the specs.
+Free Ubuntu 22.04 VPS, right from Discord. One command, full root in your browser, no card, no cost. Type !deploy to get your free VPS, or !about to see the specs.
 ```
 
 3. Reload Discord (Ctrl+R) - the profile card is cached for a while.
@@ -471,7 +483,7 @@ promoted automatically.
 
 The banner used to be installed with `printf '%s' "line1\nline2" >> /root/.bashrc`.
 Bash does **not** expand `\n` with `%s`, so `.bashrc` received one broken line and
-the banner was never executed. On top of that, tmate starts `bash -l`, which does
+the banner was never executed. On top of that, the login shell is `bash -l`, which does
 not necessarily source `.bashrc` at all.
 
 Now the bot:
@@ -480,33 +492,72 @@ Now the bot:
 2. installs `/usr/local/bin/cloudy-banner`, `/usr/local/bin/cloudy-login`,
    `/etc/profile.d/00-cloudy-banner.sh`, plus hooks in `/root/.bashrc` and
    `/root/.bash_profile` (guarded by `CLOUDY_BANNER_SHOWN`, so it never prints twice);
-3. starts the tmate session through `cloudy-login`, which prints the banner and then
+3. starts the web terminal through `cloudy-login`, which prints the banner and then
    `exec bash -l` — so it shows even on a container with a stripped-down profile;
-4. re-installs the banner on **deploy, start, restart and every SSH request**, and
+4. re-installs the banner on **deploy, start, restart and every terminal request**, and
    runs a self-test inside the guest (`banner install issue …` appears in the bot log
    if something is wrong).
 
 To see it: `!manage` → **Web terminal** (a fresh session re-installs the banner),
 or type `banner` inside the VPS.
 
-## Leaves (the free-VPS currency)
+## Leaves (cosmetic since 1.3 Beta)
 
-Every user has a balance of leaves. Leaves are what keeps a free VPS online:
+**Leaves no longer limit anything.** `LEAVES_ENABLED=0` is the default: nothing
+is charged, the billing loop never starts, `!deploy` never asks for a balance,
+and a server is never stopped for running out of leaves. The only limit is the
+**30-day term**. `!bonus` and `!give` were **removed** in 1.3 Beta together with
+the **Give leaves** button; the balance stays on `!profile` as a cosmetic score,
+with an unlimited badge instead of the remaining uptime.
 
-* a new account starts with **3** leaves (`START_LEAVES`)
+Set `LEAVES_ENABLED=1` in `.env` to bring the old economy back, unchanged:
+
+* a new account starts with `START_LEAVES` leaves
 * a **running** VPS costs **1** leaf per hour (`LEAF_COST_PER_HOUR`); a stopped one is free
-* `!bonus` (or the green button on `!profile`) gives **+25** leaves once every **24 h**
 * at **0** leaves the VPS is **stopped, never deleted** - the owner gets a DM and can start it again from `!manage` after topping up
 * staff servers (owner IDs) are never charged
 
 Commands:
 
-* `!profile` (`!me`, `!bal`, `!balance`, RU: `!profile` / `!balans` / `!listiki`) - name, ID, balance, remaining uptime, VPS status, bonus timer
-* `!bonus` (`!daily`, RU `!bonus`) - claim the daily leaves
-* `!give <@user|id> <amount>` - staff only; a negative amount takes leaves away. The same thing is available as the **Give leaves** button in `!admin`.
+* `!profile` (`!me`, `!bal`, `!balance`, RU: `!профиль` / `!баланс` / `!листики`) - name, ID, balance, VPS status
+* `!bonus`, `!give` and the **Give leaves** button in `!admin` no longer exist
 
-Balances live in `WALLET_FILE` (`/app/data/wallet.json` by default), so they survive restarts.
-Billing runs every 5 minutes and charges every full hour of uptime, so a restart never double-charges.
+Balances live in `WALLET_FILE` (`$DATA_DIR/wallet.json`, i.e. `./data/wallet.json`
+outside Docker), so they survive restarts. With `LEAVES_ENABLED=1` billing runs
+every 5 minutes and charges every full hour of uptime, so a restart never
+double-charges; with `LEAVES_ENABLED=0` the loop does not even start.
+
+---
+
+## The 30-day term
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `VPS_LIFETIME_DAYS` | `30` | How long a free VPS lives. `0` = unlimited. |
+| `VPS_EXPIRY_ACTION` | `delete` | What happens at the end: `delete` frees the slot, `stop` only powers it off. |
+| `VPS_EXPIRY_WARN_DAYS` | `7,3,1` | When to DM the owner before the end. |
+
+* `!deploy` shows the term on the offer card and on the success card, with the
+  exact expiry date.
+* `!manage` and `!specs` show the days left; the expiry timestamp is rendered in
+  every user's own timezone by Discord.
+* A background loop checks every 30 minutes, DMs the reminders, and releases the
+  server when the term is over. Staff servers never expire.
+* Staff can extend any term with `!renew <@user|id> [days]` (`0` = unlimited).
+* Staff can hand out a fully custom server with
+  `!givevps <@user|id> [username] [RAM] [disk] [days]`: RAM accepts `2048` or
+  `4gb`, disk `40` or `40gb`, days `60`, `2m` or `0` for unlimited. A bare
+  number up to 64 is read as GB, so `!givevps @user alex 4 40 60` means 4 GB
+  RAM / 40 GB disk / 60 days. The username becomes a real account inside the
+  guest with passwordless `sudo` (terminal sessions still land as `root`).
+* Only the target is required, and the rest is parsed by shape, not by
+  position: anything that looks like a number is a resource value, anything
+  else is the login. `!givevps @user 5g 25 1` therefore means 5 GB RAM,
+  25 GB disk and one day, and the login is taken from the Discord account
+  (cleaned up for `useradd`: `xtekx [DXD]` becomes `xtekx-dxd`). Values can
+  also be named in any order, including `cpu` and `swap`:
+  `!givevps @user disk=25 ram=5g days=1 cpu=2 swap=1g` (`озу`, `диск`,
+  `дней`, `логин` work too).
 
 ---
 

@@ -1,7 +1,7 @@
 """Docker-backed VPS manager for Cloudy VPS Bot.
 
 Each "VPS" is a long-running Ubuntu 22.04 container with resource limits.
-SSH access is provided through tmate, so no port forwarding is required.
+Access is provided through the sshx browser terminal, so no ports are opened.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 import time
 import uuid
 
@@ -33,13 +34,10 @@ from config import (
     SSHX_SERVER,
     SSHX_TIMEOUT,
     STATE_FILE,
-    TMATE_ED25519_FINGERPRINT,
-    TMATE_PORTS,
-    TMATE_RSA_FINGERPRINT,
-    TMATE_SERVER_HOST,
-    TMATE_TIMEOUT,
     VPS_DNS,
     VPS_IMAGE,
+    VPS_LIFETIME_DAYS,
+    VPS_LIFETIME_SECONDS,
     is_owner,
 )
 
@@ -71,7 +69,6 @@ case $- in
 esac
 """
 
-# Entry point used by the tmate session, so the banner shows even if the
 # guest image has a stripped down /root/.profile.
 LOGIN_WRAPPER = """#!/bin/bash
 export TERM="${TERM:-xterm-256color}"
@@ -86,19 +83,12 @@ export CLOUDY_BANNER_SHOWN=1
 exec bash -l
 """
 
-TMATE_SOCK = "/tmp/cloudy.tmate.sock"
-TMATE_LOG = "/tmp/cloudy.tmate.log"
-TMATE_CONF = "/root/.tmate.conf"
-
 # sshx: browser terminal. The client is a single static binary; it prints one
 # line like "https://sshx.io/s/wC8cc6Mbjv#W0apHWrt8OaX4W" and keeps running.
 SSHX_BIN = "/usr/local/bin/sshx"
 SSHX_LOG = "/tmp/cloudy.sshx.log"
 SSHX_URL_RE = re.compile(r"https?://[^\s\"']+/s/[A-Za-z0-9_-]+#[A-Za-z0-9_-]+")
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
-
-# Static tmate build used when the distro package is unavailable.
-_GH = "https://" + "github.com/tmate-io/tmate/releases/download"
 
 
 class VPSError(Exception):
@@ -128,15 +118,38 @@ class VPSManager:
         try:
             with open(STATE_FILE, "r", encoding="utf-8") as fh:
                 self._state = json.load(fh)
-        except (FileNotFoundError, json.JSONDecodeError):
+        except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
+            self._state = {"servers": {}}
+        if not isinstance(self._state, dict) or "servers" not in self._state:
             self._state = {"servers": {}}
 
     def _save_state(self) -> None:
-        os.makedirs(os.path.dirname(STATE_FILE) or ".", exist_ok=True)
-        tmp = f"{STATE_FILE}.tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(self._state, fh, indent=2)
-        os.replace(tmp, STATE_FILE)
+        """Persist the state file without ever breaking the caller.
+
+        The old version let OSError bubble up: on a host install
+        `os.makedirs("/app/data")` raised `[Errno 13] Permission denied:
+        '/app'` in the middle of `!deploy`, so the container was created but
+        the deployment was reported as failed. The data folder is resolved to
+        a writable one now (config.DATA_DIR) and any leftover I/O problem is
+        logged - plus a /tmp copy - instead of killing the command.
+        """
+        try:
+            os.makedirs(os.path.dirname(STATE_FILE) or ".", exist_ok=True)
+            tmp = f"{STATE_FILE}.tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(self._state, fh, indent=2, ensure_ascii=False)
+            os.replace(tmp, STATE_FILE)
+            return
+        except OSError as exc:
+            log.error("could not save state to %s: %s", STATE_FILE, exc)
+
+        fallback = os.path.join(tempfile.gettempdir(), "cloudy-vps_state.json")
+        try:
+            with open(fallback, "w", encoding="utf-8") as fh:
+                json.dump(self._state, fh, indent=2, ensure_ascii=False)
+            log.warning("state written to %s instead", fallback)
+        except OSError as exc:  # pragma: no cover
+            log.error("state could not be persisted at all: %s", exc)
 
     # ------------------------------------------------------------------
     # Lookups
@@ -249,13 +262,79 @@ class VPSManager:
             return used, None
         return used, int(MAX_VPS_PER_USER)
 
-    def _create_sync(self, user_id: int, username: str, lang: str = "en") -> dict:
+    _LOGIN_CLEAN = re.compile(r"[^a-z0-9_-]+")
+
+    @classmethod
+    def normalize_login(cls, value: str, fallback: str = "root") -> str:
+        """Turn free-form staff input into a valid Linux login."""
+        login = cls._LOGIN_CLEAN.sub("", str(value or "").strip().lower())
+        login = login.lstrip("-_")[:32]
+        if not login or login[0].isdigit():
+            return fallback
+        return login
+
+    # Accounts that already exist in the guest image: taking one over would
+    # break the container instead of handing out a login.
+    _LOGIN_RESERVED = {
+        "bin",
+        "daemon",
+        "games",
+        "lp",
+        "mail",
+        "man",
+        "news",
+        "nobody",
+        "proxy",
+        "root",
+        "sshd",
+        "sync",
+        "sys",
+        "systemd",
+        "ubuntu",
+        "uucp",
+        "www-data",
+    }
+
+    @classmethod
+    def suggest_login(cls, *hints: str) -> str:
+        """Derive a valid Linux login from a Discord account name.
+
+        Used when `!givevps` is called without a username: staff should not
+        have to invent one, and a Discord name may contain spaces, dots,
+        emoji or Cyrillic - none of which `useradd` accepts. The first hint
+        that survives the cleanup wins.
+        """
+        for hint in hints:
+            raw = str(hint or "").strip().lower().split("#")[0]
+            raw = raw.replace(" ", "-").replace(".", "-")
+            login = cls._LOGIN_CLEAN.sub("", raw).strip("-_")[:32]
+            if not login:
+                continue
+            if login[0].isdigit():
+                # Linux logins cannot start with a digit.
+                login = f"u{login}"[:32]
+            if login in cls._LOGIN_RESERVED:
+                login = f"{login}-vps"[:32]
+            return login
+        return "root"
+
+    def _create_sync(
+        self,
+        user_id: int,
+        username: str,
+        lang: str = "en",
+        overrides: dict | None = None,
+    ) -> dict:
+        # `overrides` is the staff grant path (!givevps): custom login, RAM,
+        # disk and term - and no quota / slot checks, because staff decides.
+        opts = dict(overrides or {})
+        forced = bool(opts.get("force"))
         # Hard quota: regular users get MAX_VPS_PER_USER (1), staff unlimited.
         # Counting real containers instead of state entries keeps the limit
         # working even if the state file was lost or edited by hand.
         # Global capacity: when every slot is taken nobody but staff can
         # deploy a new VPS until one is deleted or the limit is raised.
-        if self.slots is not None and not is_owner(user_id):
+        if self.slots is not None and not forced and not is_owner(user_id):
             used_total, total = self.capacity()
             if used_total >= total:
                 raise VPSError(
@@ -263,7 +342,7 @@ class VPSManager:
                     + t(lang, "slots.full", total=total, prefix=COMMAND_PREFIX)
                 )
 
-        if MAX_VPS_PER_USER and not is_owner(user_id):
+        if MAX_VPS_PER_USER and not forced and not is_owner(user_id):
             used = len(self._owned_containers(user_id))
             if used >= int(MAX_VPS_PER_USER):
                 # Localized (the old message was English-only and hardcoded
@@ -283,7 +362,17 @@ class VPSManager:
 
         name = f"{CONTAINER_PREFIX}-{user_id}-{uuid.uuid4().hex[:6]}"
         # Live plan: staff may have raised RAM / disk / vCPU since start-up.
-        plan = PLAN_STORE.plan()
+        plan = dict(PLAN_STORE.plan())
+        # Per-server overrides from !givevps win over the global plan.
+        for _key in ("ram_mb", "swap_mb", "disk_gb"):
+            if opts.get(_key) is not None:
+                plan[_key] = max(0, int(opts[_key]))
+        if opts.get("cpu_cores") is not None:
+            plan["cpu_cores"] = max(0.1, float(opts["cpu_cores"]))
+        plan["ram_mb"] = max(128, int(plan["ram_mb"]))
+        plan["disk_gb"] = max(1, int(plan["disk_gb"]))
+        plan["swap_mb"] = max(0, int(plan.get("swap_mb") or 0))
+        login = self.normalize_login(opts.get("login") or "root")
         mem_limit = f"{plan['ram_mb']}m"
         memswap = f"{plan['ram_mb'] + plan['swap_mb']}m"
 
@@ -299,7 +388,6 @@ class VPSManager:
             nano_cpus=int(plan["cpu_cores"] * 1_000_000_000),
             pids_limit=512,
             restart_policy={"Name": "unless-stopped"},
-            # tmate needs a working resolver for ssh.tmate.io.
             dns=list(VPS_DNS) or None,
             security_opt=["no-new-privileges:true"],
             # CLOUDY_LANG localizes the guest login banner (ru / en).
@@ -311,6 +399,7 @@ class VPSManager:
                 "CLOUDY_RAM_MB": str(plan["ram_mb"]),
                 "CLOUDY_DISK_GB": str(plan["disk_gb"]),
                 "CLOUDY_CPU": str(plan["cpu_cores"]),
+                "CLOUDY_USER": login,
             },
             labels={
                 "cloudy.vps": "true",
@@ -335,18 +424,41 @@ class VPSManager:
         except Exception as exc:  # pragma: no cover
             log.warning("could not install banner: %s", exc)
 
+        # Staff can hand out a named login: !givevps <@user> <username> ...
+        if login != "root":
+            try:
+                self._ensure_guest_user(container, login)
+            except Exception as exc:  # pragma: no cover
+                log.warning("could not create the guest login %s: %s", login, exc)
+                login = "root"
+
+        created_ts = time.time()
+        # 1.3 Beta: `!deploy` grants the server for VPS_LIFETIME_DAYS days
+        # (30 by default) and `!givevps` may pass its own number of days.
+        # 0 disables the term completely.
+        term_days = opts.get("days")
+        term_days = int(VPS_LIFETIME_DAYS if term_days is None else term_days)
+        expires_ts = created_ts + term_days * 86400.0 if term_days > 0 else 0.0
         record = {
             "container_id": container.id,
             "name": name,
+            "hostname": kwargs.get("hostname") or name,
             "owner_id": user_id,
             "owner_name": username,
+            # Login the terminal sessions land in (full root access).
+            "ssh_user": "root",
+            # Account created inside the guest for the owner (!givevps).
+            "login": login,
             "os": plan["os"],
             "ram_mb": plan["ram_mb"],
+            "swap_mb": plan.get("swap_mb", 0),
             "cpu_cores": plan["cpu_cores"],
             "disk_gb": plan["disk_gb"],
             "bandwidth": plan["bandwidth"],
-            "created_ts": time.time(),
-            "ssh": None,
+            "created_ts": created_ts,
+            "term_days": term_days,
+            "expires_ts": expires_ts,
+            "warned_days": [],
         }
         # Staff may own several servers: keep the newest one as the primary
         # record (the one !manage / !destroy work on) and park the previous
@@ -362,6 +474,50 @@ class VPSManager:
     async def create_vps(self, user_id: int, username: str, lang: str = "en") -> dict:
         async with self._lock:
             return await asyncio.to_thread(self._create_sync, user_id, username, lang)
+
+    async def create_custom(
+        self,
+        user_id: int,
+        username: str,
+        *,
+        login: str = "root",
+        ram_mb: int | None = None,
+        disk_gb: int | None = None,
+        cpu_cores: float | None = None,
+        swap_mb: int | None = None,
+        days: int | None = None,
+        lang: str = "en",
+    ) -> dict:
+        """Staff grant (`!givevps`): custom login / RAM / disk / term, no quota."""
+        overrides = {
+            "login": login,
+            "ram_mb": ram_mb,
+            "disk_gb": disk_gb,
+            "cpu_cores": cpu_cores,
+            "swap_mb": swap_mb,
+            "days": days,
+            "force": True,
+        }
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._create_sync, user_id, username, lang, overrides
+            )
+
+    def _ensure_guest_user(self, container, login: str) -> None:
+        """Create a sudo-enabled account inside the guest (idempotent)."""
+        script = (
+            f"id -u {login} >/dev/null 2>&1 || useradd -m -s /bin/bash {login}; "
+            f"usermod -aG sudo {login} 2>/dev/null || true; "
+            f"passwd -d {login} >/dev/null 2>&1 || true; "
+            f"mkdir -p /home/{login} && chown -R {login}:{login} /home/{login}; "
+            f"printf '%s\\n' '{login} ALL=(ALL) NOPASSWD:ALL' "
+            f"> /etc/sudoers.d/90-cloudy-{login} 2>/dev/null || true; "
+            f"chmod 0440 /etc/sudoers.d/90-cloudy-{login} 2>/dev/null || true; "
+            f"id -u {login}"
+        )
+        code, out, err = self._exec(container, script)
+        if code not in (0, None):
+            raise VPSError(f"could not create the login `{login}`: {err or out}")
 
     # ------------------------------------------------------------------
     # Login banner (works on old containers too, no image rebuild needed)
@@ -400,7 +556,7 @@ class VPSManager:
         does NOT expand `\\n` in bash - the previous version wrote a single
         broken line into /root/.bashrc, which is why no banner appeared.
         Hooks are installed in /etc/profile.d, /root/.bashrc and
-        /root/.bash_profile, and the tmate session runs `cloudy-login`, so the
+        /root/.bash_profile, and the web terminal runs `cloudy-login`, so the
         banner shows no matter how the guest image is set up.
         """
         try:
@@ -506,12 +662,6 @@ class VPSManager:
             except Exception as exc:  # pragma: no cover
                 log.warning("could not refresh banner: %s", exc)
 
-        # Any power action invalidates the previous tmate session.
-        record = self.get_record(user_id)
-        if record:
-            record["ssh"] = None
-            self._save_state()
-
     async def power_action(self, user_id: int, action: str) -> None:
         async with self._lock:
             await asyncio.to_thread(self._action_sync, user_id, action)
@@ -556,10 +706,6 @@ class VPSManager:
             if container.status != "running":
                 return False
             container.stop(timeout=10)
-            record = self.get_record(user_id)
-            if record:
-                record["ssh"] = None
-                self._save_state()
             return True
 
         async with self._lock:
@@ -578,24 +724,43 @@ class VPSManager:
         attrs = container.attrs
         status = container.status
 
+        # Servers created before 1.3 Beta get a term as well.
+        self._ensure_term(record)
+        expires_ts = float(record.get("expires_ts") or 0)
+        seconds_left = max(0.0, expires_ts - time.time()) if expires_ts else 0.0
+
         info = {
             "id": container.id,
             "short_id": container.id[:12],
             "name": record["name"],
+            "hostname": record.get("hostname") or record["name"],
             "status": status,
             "os": record["os"],
             "ram_limit_mb": record["ram_mb"],
+            "swap_mb": record.get("swap_mb", 0),
             "cpu_limit": record["cpu_cores"],
             "disk_gb": record["disk_gb"],
             "bandwidth": record["bandwidth"],
             "created_ts": record["created_ts"],
             "owner_id": record.get("owner_id", user_id),
+            "owner_name": record.get("owner_name", ""),
+            "ssh_user": record.get("ssh_user") or "root",
+            # Account handed out with the server (!givevps), "root" otherwise.
+            "login": record.get("login") or record.get("ssh_user") or "root",
+            "term_days": int(record.get("term_days") or VPS_LIFETIME_DAYS),
+            "expires_ts": expires_ts,
+            "seconds_left": seconds_left,
+            "days_left": int(seconds_left // 86400) if expires_ts else 0,
+            "hours_left": int(seconds_left // 3600) if expires_ts else 0,
+            "expired": bool(expires_ts and seconds_left <= 0),
+            "unlimited_term": not expires_ts,
             "ram_used_mb": 0,
             "cpu_percent": 0.0,
             "net_rx_mb": 0.0,
             "net_tx_mb": 0.0,
             "uptime_seconds": 0,
-            "has_ssh": bool(record.get("ssh")),
+            "has_sshx": bool(record.get("sshx")),
+            "disk_used_gb": 0.0,
         }
 
         if status == "running":
@@ -642,8 +807,85 @@ class VPSManager:
         return await asyncio.to_thread(self._info_sync, user_id)
 
     # ------------------------------------------------------------------
-    # tmate SSH
+    # 30-day term (`!deploy` grants the VPS for VPS_LIFETIME_DAYS days)
     # ------------------------------------------------------------------
+    def _ensure_term(self, record: dict) -> bool:
+        """Add the term to servers created before 1.3 Beta. True when changed."""
+        if VPS_LIFETIME_SECONDS <= 0:
+            return False
+        if float(record.get("expires_ts") or 0) > 0:
+            return False
+        created = float(record.get("created_ts") or time.time())
+        record["expires_ts"] = created + VPS_LIFETIME_SECONDS
+        record["term_days"] = int(record.get("term_days") or VPS_LIFETIME_DAYS)
+        record.setdefault("warned_days", [])
+        return True
+
+    def terms(self) -> list[dict]:
+        """Term info for every known server, the closest expiry first."""
+        changed = False
+        now = time.time()
+        rows: list[dict] = []
+        for key, record in list(self._state["servers"].items()):
+            changed = self._ensure_term(record) or changed
+            expires = float(record.get("expires_ts") or 0)
+            rows.append(
+                {
+                    "key": key,
+                    "owner_id": int(record.get("owner_id", 0) or 0),
+                    "owner_name": record.get("owner_name", ""),
+                    "name": record.get("name", ""),
+                    "expires_ts": expires,
+                    "seconds_left": max(0.0, expires - now) if expires else 0.0,
+                    "days_left": int(max(0.0, expires - now) // 86400) if expires else 0,
+                    "expired": bool(expires and expires <= now),
+                    "warned_days": list(record.get("warned_days") or []),
+                    "primary": key.isdigit(),
+                }
+            )
+        if changed:
+            self._save_state()
+        return sorted(rows, key=lambda row: row["expires_ts"] or float("inf"))
+
+    async def renew(self, user_id: int, days: float | None = None) -> float:
+        """Extend the term (default: a whole new term). Returns the new expiry."""
+
+        def _work() -> float:
+            record = self.get_record(user_id)
+            if record is None:
+                raise VPSError(
+                    "That user does not have a VPS. Use `!deploy` to create one."
+                )
+            span = float(VPS_LIFETIME_DAYS if days is None else days) * 86400.0
+            if span <= 0:
+                record["expires_ts"] = 0.0  # unlimited
+            else:
+                base = max(float(record.get("expires_ts") or 0), time.time())
+                record["expires_ts"] = base + span
+            record["term_days"] = int(record.get("term_days") or VPS_LIFETIME_DAYS)
+            record["warned_days"] = []
+            self._save_state()
+            return float(record.get("expires_ts") or 0)
+
+        async with self._lock:
+            return await asyncio.to_thread(_work)
+
+    async def mark_warned(self, user_id: int, day: int) -> None:
+        """Remember that the "N days left" reminder was already sent."""
+
+        def _work() -> None:
+            record = self.get_record(user_id)
+            if record is None:
+                return
+            warned = [int(d) for d in (record.get("warned_days") or [])]
+            if int(day) not in warned:
+                warned.append(int(day))
+                record["warned_days"] = warned
+                self._save_state()
+
+        async with self._lock:
+            await asyncio.to_thread(_work)
+
     @staticmethod
     def _exec(container, script: str) -> tuple[int, str, str]:
         """Run a bash snippet in the guest, returning (code, stdout, stderr)."""
@@ -659,122 +901,6 @@ class VPSManager:
             (err or b"").decode("utf-8", "replace").strip(),
         )
 
-    def _ensure_tmate_binary(self, container) -> None:
-        code, _, _ = self._exec(container, "command -v tmate")
-        if code == 0:
-            return
-
-        log.info("tmate missing in %s, installing at runtime", container.short_id)
-        install = (
-            "set -e; "
-            "(apt-get update -qq && apt-get install -y -qq tmate) >/dev/null 2>&1 || true; "
-            "command -v tmate >/dev/null 2>&1 && exit 0; "
-            "arch=$(uname -m); "
-            'case "$arch" in x86_64) t=amd64 ;; aarch64) t=arm64v8 ;; armv7l) t=arm32v7 ;; '
-            '*) echo "unsupported arch $arch" >&2; exit 1 ;; esac; '
-            f'v=2.4.0; url="{_GH}/$v/tmate-$v-static-linux-$t.tar.xz"; '
-            '(command -v wget >/dev/null && wget -qO /tmp/tmate.tar.xz "$url") '
-            '|| curl -fsSL -o /tmp/tmate.tar.xz "$url"; '
-            "tar -xf /tmp/tmate.tar.xz -C /tmp; "
-            'mv /tmp/tmate-$v-static-linux-$t/tmate /usr/local/bin/tmate; '
-            "chmod +x /usr/local/bin/tmate; "
-            "rm -rf /tmp/tmate.tar.xz /tmp/tmate-$v-static-linux-$t"
-        )
-        code, out, err = self._exec(container, install)
-        if code != 0:
-            raise VPSError(
-                "**tmate is not installed inside the VPS and could not be downloaded.**\n"
-                "Rebuild the guest image so tmate is baked in:\n"
-                "```bash\ndocker build --no-cache -t cloudy-vps:ubuntu-22.04 "
-                "./images/ubuntu-22.04\n```\n"
-                f"Installer output:\n```\n{(err or out or 'no output')[-600:]}\n```"
-            )
-
-    def _network_diagnostics(self, container) -> str:
-        # Report the SSH banner too: an open TCP port is not proof of a relay.
-        port_checks = "; ".join(
-            f"echo '--- tcp {p} ---'; "
-            "{ "
-            "b=$(timeout 8 bash -c '"
-            f"exec 3<>/dev/tcp/{TMATE_SERVER_HOST}/{p} || exit 1; "
-            "printf \"SSH-2.0-cloudy_probe\\r\\n\" >&3; "
-            "head -c 60 <&3' 2>/dev/null); "
-            'rc=$?; '
-            'if [ "$rc" -ne 0 ]; then echo "TCP FAILED (blocked outbound)"; '
-            'elif echo "$b" | grep -q "^SSH-"; then echo "TCP OK + SSH relay"; '
-            'else echo "TCP OK but NO SSH banner (not a tmate relay)"; fi; '
-            "}"
-            for p in TMATE_PORTS
-        )
-        checks = (
-            f"echo '--- dns ---'; (getent hosts {TMATE_SERVER_HOST} || echo 'DNS FAILED'); "
-            f"{port_checks}; "
-            "echo '--- tmate version ---'; (tmate -V 2>&1 | head -1); "
-            f"echo '--- log ---'; (tail -n 12 {TMATE_LOG} 2>/dev/null || echo 'no log')"
-        )
-        _, out, err = self._exec(container, checks)
-        return (out or err or "no diagnostics").strip()
-
-    # -- relay port handling -------------------------------------------
-    def _probe_ports(self, container) -> dict[int, str]:
-        """Classify every relay port: 'relay', 'no-ssh', or 'closed'.
-
-        A plain TCP connect is NOT enough. `ssh.tmate.io` accepts TCP on 22
-        and 443 on most nodes, but those are not the tmate relay: 22 drops the
-        connection immediately and 443 never sends an SSH banner, so tmate
-        burns the whole timeout there and the real error is hidden. Only a port
-        that answers with an `SSH-2.0-...` banner can complete the handshake.
-        """
-        # NOTE: tmate-ssh-server waits for the CLIENT identification string
-        # before sending its own banner, so a read-only probe times out even on
-        # a healthy relay. Send a version string first, then read.
-        checks = "; ".join(
-            "{ "
-            "b=$(timeout 8 bash -c '"
-            f"exec 3<>/dev/tcp/{TMATE_SERVER_HOST}/{p} || exit 1; "
-            "printf \"SSH-2.0-cloudy_probe\\r\\n\" >&3; "
-            "head -c 60 <&3' 2>/dev/null); "
-            'rc=$?; '
-            f'if [ "$rc" -ne 0 ]; then echo "CLOSED {p}"; '
-            f'elif echo "$b" | grep -q "^SSH-"; then echo "RELAY {p}"; '
-            f'else echo "NOSSH {p}"; fi; '
-            "}"
-            for p in TMATE_PORTS
-        )
-        _, out, _ = self._exec(container, checks)
-
-        kinds = {"RELAY": "relay", "NOSSH": "no-ssh", "CLOSED": "closed"}
-        result: dict[int, str] = {}
-        for line in out.splitlines():
-            parts = line.split()
-            if len(parts) == 2 and parts[0] in kinds and parts[1].isdigit():
-                result[int(parts[1])] = kinds[parts[0]]
-        return {p: result.get(p, "closed") for p in TMATE_PORTS}
-
-    def _reachable_ports(self, container) -> list[int]:
-        """Relay ports worth trying, best first."""
-        probe = self._probe_ports(container)
-        relay = [p for p in TMATE_PORTS if probe.get(p) == "relay"]
-        if relay:
-            return relay
-        # Nothing answered like an SSH relay. Still try the ports that at least
-        # opened, because a few firewalls block only the probe itself.
-        return [p for p in TMATE_PORTS if probe.get(p) != "closed"] or list(TMATE_PORTS)
-
-    def _write_tmate_conf(self, container, port: int) -> None:
-        """Point tmate at the relay host/port that we want to use."""
-        lines = [
-            f"set -g tmate-server-host {TMATE_SERVER_HOST}",
-            f"set -g tmate-server-port {port}",
-        ]
-        if TMATE_RSA_FINGERPRINT:
-            lines.append(f"set -g tmate-server-rsa-fingerprint {TMATE_RSA_FINGERPRINT}")
-        if TMATE_ED25519_FINGERPRINT:
-            lines.append(
-                f"set -g tmate-server-ed25519-fingerprint {TMATE_ED25519_FINGERPRINT}"
-            )
-        body = "\\n".join(lines)
-        self._exec(container, f"printf '{body}\\n' > {TMATE_CONF}")
 
     # ------------------------------------------------------------------
     # sshx: browser terminal (second access method, no SSH client needed)
@@ -909,7 +1035,6 @@ class VPSManager:
 
         self._ensure_sshx_binary(container, lang)
 
-        # Same banner refresh as for tmate, so the web terminal greets nicely.
         try:
             self._install_banner(container)
         except Exception as exc:  # pragma: no cover
@@ -931,179 +1056,4 @@ class VPSManager:
         return await asyncio.wait_for(
             asyncio.to_thread(self._sshx_sync, user_id, force_new, lang),
             timeout=SSHX_TIMEOUT + 30,
-        )
-
-    def _kill_session(self, container) -> None:
-        """Stop a previous tmate server without killing our own shell.
-
-        NOTE: `pkill -f 'tmate -S <sock>'` also matches the `bash -lc "..."`
-        process that is running the script itself, so it used to SIGTERM its
-        own shell before tmate was ever started (that is why no tmate log was
-        produced). The `[t]mate` bracket trick keeps the pattern from matching
-        the command line that contains it.
-        """
-        self._exec(
-            container,
-            f"tmate -S {TMATE_SOCK} kill-server >/dev/null 2>&1; "
-            f"pkill -f '[t]mate -S {TMATE_SOCK}' >/dev/null 2>&1; "
-            f"rm -f {TMATE_SOCK}; exit 0",
-        )
-
-    def _start_session(self, container, port: int, budget: float) -> tuple[str, str]:
-        """Start a detached tmate session on `port`.
-
-        Returns (ssh_line, log_tail). `ssh_line` is empty when it did not work.
-        """
-        self._write_tmate_conf(container, port)
-        self._kill_session(container)
-
-        port_log = f"/tmp/cloudy.tmate.{port}.log"
-        start = (
-            f"rm -f {port_log}; "
-            "mkdir -p /root/.ssh && chmod 700 /root/.ssh; "
-            "export TERM=xterm-256color; "
-            f"setsid nohup tmate -f {TMATE_CONF} -S {TMATE_SOCK} -F new-session -d "
-            "'TERM=xterm-256color /bin/bash -lc \"test -x /usr/local/bin/cloudy-login "
-            "&& exec /usr/local/bin/cloudy-login || exec bash -l\"' "
-            f"</dev/null > {port_log} 2>&1 & "
-            f"sleep 2; ln -sf {port_log} {TMATE_LOG}; echo started; exit 0"
-        )
-        self._exec(container, start)
-
-        deadline = time.monotonic() + budget
-        while time.monotonic() < deadline:
-            code, out, _ = self._exec(
-                container,
-                f"tmate -S {TMATE_SOCK} display -p '#{{tmate_ssh}}' 2>/dev/null",
-            )
-            candidate = next(
-                (ln.strip() for ln in out.splitlines() if ln.strip().startswith("ssh ")),
-                "",
-            )
-            if code == 0 and candidate and "@" in candidate:
-                return candidate, ""
-            # If tmate died (relay refused the handshake) there is no point in
-            # waiting for the whole budget - report the log straight away.
-            _, alive, _ = self._exec(
-                container, f"pgrep -f '[t]mate -S {TMATE_SOCK}' >/dev/null && echo yes"
-            )
-            if alive.strip() != "yes":
-                break
-            time.sleep(2)
-
-        _, tail, _ = self._exec(
-            container, f"tail -n 8 {port_log} 2>/dev/null || echo 'no log'"
-        )
-        return "", (tail or "no log").strip()
-
-    def _tmate_sync(self, user_id: int, force_new: bool = False) -> str:
-        container = self._container(user_id)
-        record = self.get_record(user_id)
-        if container is None or record is None:
-            raise VPSError("You do not have a VPS yet. Use `!deploy` to create one.")
-
-        container.reload()
-        if container.status != "running":
-            raise VPSError("Start your VPS first — a stopped server cannot open SSH.")
-
-        if record.get("ssh") and not force_new:
-            # Re-use the session only if it is genuinely still alive.
-            code, out, _ = self._exec(
-                container,
-                f"tmate -S {TMATE_SOCK} display -p '#{{tmate_ssh}}' 2>/dev/null",
-            )
-            if code == 0 and out.startswith("ssh "):
-                if out != record["ssh"]:
-                    record["ssh"] = out
-                    self._save_state()
-                return out
-
-        self._ensure_tmate_binary(container)
-
-        # Refresh the banner right before the shell is created, so even VPS
-        # containers made by older bot versions greet the user properly.
-        try:
-            self._install_banner(container)
-        except Exception as exc:  # pragma: no cover
-            log.warning("could not refresh banner before session: %s", exc)
-
-        # The default relay port (2200) is blocked on a lot of hosts, so try
-        # every configured port and keep the first one that produces a session.
-        probe = self._probe_ports(container)
-        candidates = [p for p in TMATE_PORTS if probe.get(p) == "relay"] or [
-            p for p in TMATE_PORTS if probe.get(p) != "closed"
-        ] or list(TMATE_PORTS)
-        budget = max(20.0, float(TMATE_TIMEOUT - 10))
-        per_port = max(15.0, budget / max(1, len(candidates)))
-
-        ssh_line = ""
-        used_port = None
-        failures: list[str] = []
-        for port in candidates:
-            log.info(
-                "opening tmate session for %s via %s:%s",
-                container.short_id,
-                TMATE_SERVER_HOST,
-                port,
-            )
-            ssh_line, tail = self._start_session(container, port, per_port)
-            if ssh_line:
-                used_port = port
-                break
-            failures.append(f"[port {port}]\n{tail}")
-
-        if not ssh_line:
-            diag = self._network_diagnostics(container)
-            tried = ", ".join(str(p) for p in candidates)
-            fail_log = "\n".join(failures)[-700:]
-
-            port_report = ", ".join(
-                f"{p}: "
-                + {
-                    "relay": "tmate relay reachable",
-                    "no-ssh": "TCP opens but no SSH banner (not a tmate relay)",
-                    "closed": "blocked outbound",
-                }[probe.get(p, "closed")]
-                for p in TMATE_PORTS
-            )
-
-            if not any(k == "relay" for k in probe.values()):
-                cause = (
-                    "**No reachable tmate relay.** TCP 2200 is the only real relay "
-                    f"port on `{TMATE_SERVER_HOST}`, and it is blocked outbound from "
-                    "this host. Ports 22 and 443 accept TCP but send no SSH banner, "
-                    "so the handshake can never finish there.\n"
-                    "`ufw allow out 2200/tcp` does not help when outbound is already "
-                    "allowed by default — the block is upstream (provider / datacenter "
-                    "egress filter).\n"
-                    "Fix it one of two ways:\n"
-                    "\u2022 ask the provider to open outbound TCP 2200, or\n"
-                    "\u2022 run your own relay on an allowed port: "
-                    "`RELAY_PORT=443 bash tools/setup_relay.sh`, then put the printed "
-                    "`TMATE_*` values in `.env` and restart the bot.\n"
-                    "Meanwhile the browser terminal (sshx) still works."
-                )
-            else:
-                cause = (
-                    f"The relay on `{TMATE_SERVER_HOST}` answered but the session "
-                    f"did not start on TCP **{tried}**. See the log below."
-                )
-
-            raise VPSError(
-                "**Could not open a tmate session.**\n"
-                f"{cause}\n"
-                f"Port probe: `{port_report}`\n"
-                f"```\n{fail_log or 'no tmate output'}\n```\n"
-                f"```\n{diag[-700:]}\n```"
-            )
-
-        record["ssh"] = ssh_line
-        record["tmate_port"] = used_port
-        self._save_state()
-        return ssh_line
-
-    async def get_ssh(self, user_id: int, force_new: bool = False) -> str:
-        return await asyncio.wait_for(
-            asyncio.to_thread(self._tmate_sync, user_id, force_new),
-            timeout=TMATE_TIMEOUT + 30,
         )
